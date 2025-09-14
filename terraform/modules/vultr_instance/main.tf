@@ -49,6 +49,6 @@ runcmd:
   # install k9s
   - curl -L -O https://github.com/derailed/k9s/releases/download/v0.50.9/k9s_linux_amd64.deb && apt install -y ./k9s_linux_*.deb && rm k9s_linux_*.deb
   # install postgres
-  - curl -L -O https://raw.githubusercontent.com/brandonros/postgres-adventure/06f3aad305ad3ade170b699f0cb1d21d7acb74dd/manifests/postgresql.yaml && kubectl apply -f postgresql.yaml
+  - curl -L -O https://raw.githubusercontent.com/brandonros/postgres-adventure/cde3577ed719ebeee54e2f52a73fbddada97bef3/manifests/postgresql.yaml && kubectl apply -f postgresql.yaml
 EOF
 }
