@@ -41,3 +41,12 @@ CREATE TABLE users (
 
 -- insert on node 2
 insert into users (name) values ('Mary Smith');
+
+-- create node2 on node2
+SELECT pglogical.create_node(
+    node_name := 'node2',
+    dsn := 'host=__NODE2_IP__ port=30432 dbname=my_db user=replicator password=test'
+);
+
+-- replicate table
+SELECT pglogical.replication_set_add_table('default', 'public.users');
