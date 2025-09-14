@@ -39,13 +39,13 @@ CREATE TABLE users (
     name VARCHAR(50)
 );
 
--- insert on node 2
-insert into users (name) values ('Mary Smith');
+-- insert sample data for __NODE_NAME__
+__SAMPLE_DATA__
 
--- create node2 on node2
+-- create __NODE_NAME__ on __NODE_NAME__
 SELECT pglogical.create_node(
-    node_name := 'node2',
-    dsn := 'host=__NODE2_IP__ port=30432 dbname=my_db user=replicator password=test'
+    node_name := '__NODE_NAME__',
+    dsn := 'host=__NODE_IP__ port=30432 dbname=my_db user=replicator password=test'
 );
 
 -- replicate table

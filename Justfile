@@ -62,8 +62,75 @@ connect instance_name: (wait-and-accept instance_name)
 
     ssh -p ${INSTANCE_SSH_PORT} ${INSTANCE_USERNAME}@${INSTANCE_IPV4}
 
+# Helper: Wait for PostgreSQL pod to be ready
+wait-for-postgres instance_name:
+    #!/usr/bin/env bash
+    set -e
+
+    cd {{ script_path }}/terraform
+    INSTANCE_IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
+    INSTANCE_USERNAME=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
+    INSTANCE_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
+
+    echo "⏳ Waiting for PostgreSQL pod on {{ instance_name }} to be ready..."
+    while ! ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP 'KUBECONFIG=/home/debian/.kube/config kubectl get pod postgresql-0 -n postgresql 2>/dev/null | grep -q "1/1.*Running"'; do
+        echo "   Waiting for postgresql-0 pod on {{ instance_name }}..."
+        sleep 2
+    done
+    echo "✅ PostgreSQL pod on {{ instance_name }} is ready"
+
+    echo "⏳ Waiting for PostgreSQL service on {{ instance_name }} to accept connections..."
+    while ! ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres -c \"SELECT 1\" > /dev/null 2>&1"'; do
+        echo "   Waiting for PostgreSQL service on {{ instance_name }}..."
+        sleep 2
+    done
+    echo "✅ PostgreSQL service on {{ instance_name }} is accepting connections"
+
+# Helper: Execute PostgreSQL command
+exec-psql instance_name database sql_file="":
+    #!/usr/bin/env bash
+    set -e
+
+    cd {{ script_path }}/terraform
+    INSTANCE_IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
+    INSTANCE_USERNAME=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
+    INSTANCE_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
+
+    if [ -z "{{ sql_file }}" ]; then
+        ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP \
+            'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d {{ database }}"'
+    else
+        cat {{ script_path }}/{{ sql_file }} | ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP \
+            'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d {{ database }}"'
+    fi
+
+# Helper: Apply SQL template with substitutions
+apply-sql-template instance_name database template_file node_name node_ip other_node_name other_node_ip:
+    #!/usr/bin/env bash
+    set -e
+
+    cd {{ script_path }}/terraform
+    INSTANCE_IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
+    INSTANCE_USERNAME=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
+    INSTANCE_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
+
+    # Load sample data if exists
+    SAMPLE_DATA=""
+    if [ -f "{{ script_path }}/sql/data/{{ node_name }}-data.sql" ]; then
+        SAMPLE_DATA=$(cat "{{ script_path }}/sql/data/{{ node_name }}-data.sql")
+    fi
+
+    cat {{ script_path }}/{{ template_file }} | \
+        sed "s/__NODE_NAME__/{{ node_name }}/g" | \
+        sed "s/__NODE_IP__/{{ node_ip }}/g" | \
+        sed "s/__OTHER_NODE_NAME__/{{ other_node_name }}/g" | \
+        sed "s/__OTHER_NODE_IP__/{{ other_node_ip }}/g" | \
+        sed "s/__SAMPLE_DATA__/$SAMPLE_DATA/g" | \
+        ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP \
+            'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d {{ database }}"'
+
 # Setup PostgreSQL replication between dc1 and dc2
-setup-replication: (wait-and-accept "dc1") (wait-and-accept "dc2")
+setup-replication: (wait-and-accept "dc1") (wait-and-accept "dc2") (wait-for-postgres "dc1") (wait-for-postgres "dc2")
     #!/usr/bin/env bash
     set -e
 
@@ -72,73 +139,32 @@ setup-replication: (wait-and-accept "dc1") (wait-and-accept "dc2")
     # Get instance details from terraform
     echo "📋 Loading instance details from terraform..."
     cd {{ script_path }}/terraform
-
     DC1_IP=$(terraform output -json instance_ipv4s | jq -r '.["dc1"]')
-    DC1_USERNAME=$(terraform output -json instance_usernames | jq -r '.["dc1"]')
-    DC1_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["dc1"]')
-
     DC2_IP=$(terraform output -json instance_ipv4s | jq -r '.["dc2"]')
-    DC2_USERNAME=$(terraform output -json instance_usernames | jq -r '.["dc2"]')
-    DC2_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["dc2"]')
-
     echo "   DC1: $DC1_IP"
     echo "   DC2: $DC2_IP"
 
-    # Wait for PostgreSQL pods to be ready
-    echo "⏳ Waiting for PostgreSQL pod on dc1 to be ready..."
-    while ! ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl get pod postgresql-0 -n postgresql 2>/dev/null | grep -q "1/1.*Running"'; do
-        echo "   Waiting for postgresql-0 pod on dc1..."
-        sleep 2
-    done
-    echo "✅ PostgreSQL pod on dc1 is ready"
-
-    echo "⏳ Waiting for PostgreSQL pod on dc2 to be ready..."
-    while ! ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl get pod postgresql-0 -n postgresql 2>/dev/null | grep -q "1/1.*Running"'; do
-        echo "   Waiting for postgresql-0 pod on dc2..."
-        sleep 2
-    done
-    echo "✅ PostgreSQL pod on dc2 is ready"
-
-    # Additional check: wait for PostgreSQL service to be actually accepting connections
-    echo "⏳ Waiting for PostgreSQL service on dc1 to accept connections..."
-    while ! ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres -c \"SELECT 1\" > /dev/null 2>&1"'; do
-        echo "   Waiting for PostgreSQL service on dc1..."
-        sleep 2
-    done
-    echo "✅ PostgreSQL service on dc1 is accepting connections"
-
-    echo "⏳ Waiting for PostgreSQL service on dc2 to accept connections..."
-    while ! ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres -c \"SELECT 1\" > /dev/null 2>&1"'; do
-        echo "   Waiting for PostgreSQL service on dc2..."
-        sleep 2
-    done
-    echo "✅ PostgreSQL service on dc2 is accepting connections"
-
     cd {{ script_path }}
 
-    # Step 1: Setup postgres database on both nodes
+    # Step 1: Setup postgres database on both nodes (identical for both)
     echo "🗄️  Setting up postgres database on dc1..."
-    cat sql/node1-postgres-setup.sql | ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres"'
+    just exec-psql dc1 postgres sql/common/postgres-setup.sql
 
     echo "🗄️  Setting up postgres database on dc2..."
-    cat sql/node2-postgres-setup.sql | ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres"'
+    just exec-psql dc2 postgres sql/common/postgres-setup.sql
 
     # Step 2: Setup my_db database with pglogical on both nodes
     echo "🔧 Setting up my_db with pglogical on dc1..."
-    cat sql/node1-my_db-setup.sql | sed 's/__NODE1_IP__/'$DC1_IP'/g; s/__NODE2_IP__/'$DC2_IP'/g' | \
-        ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d my_db"'
+    just apply-sql-template dc1 my_db sql/templates/my_db-setup.sql node1 $DC1_IP node2 $DC2_IP
 
     echo "🔧 Setting up my_db with pglogical on dc2..."
-    cat sql/node2-my_db-setup.sql | sed 's/__NODE1_IP__/'$DC1_IP'/g; s/__NODE2_IP__/'$DC2_IP'/g' | \
-        ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d my_db"'
+    just apply-sql-template dc2 my_db sql/templates/my_db-setup.sql node2 $DC2_IP node1 $DC1_IP
 
     # Step 3: Sync replication
     echo "🔄 Syncing replication on dc1..."
-    cat sql/node1-my_db-sync.sql | sed 's/__NODE1_IP__/'$DC1_IP'/g; s/__NODE2_IP__/'$DC2_IP'/g' | \
-        ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d my_db"'
+    just apply-sql-template dc1 my_db sql/templates/my_db-sync.sql node1 $DC1_IP node2 $DC2_IP
 
     echo "🔄 Syncing replication on dc2..."
-    cat sql/node2-my_db-sync.sql | sed 's/__NODE1_IP__/'$DC1_IP'/g; s/__NODE2_IP__/'$DC2_IP'/g' | \
-        ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d my_db"'
+    just apply-sql-template dc2 my_db sql/templates/my_db-sync.sql node2 $DC2_IP node1 $DC1_IP
 
     echo "✅ PostgreSQL replication setup complete!"
