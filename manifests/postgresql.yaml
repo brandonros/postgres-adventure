@@ -162,8 +162,8 @@ spec:
               containers:
                 postgresql:
                   image:
-                    repository: ghcr.io/brandonros/pgsql-http-docker
-                    tag: 0bd320eaae0ec0c26407d3ae2fd22fa93815edb2
+                    repository: ghcr.io/brandonros/postgres-adventure
+                    tag: fa9d649c0cc4b12010db0bf03c50eaba7bea5b6d
                   
                   ports:
                     postgresql:
