@@ -133,3 +133,52 @@ connect: wait-and-accept
     source "$details_file"
 
     ssh -p ${INSTANCE_SSH_PORT} ${INSTANCE_USERNAME}@${INSTANCE_IPV4}
+
+# Setup PostgreSQL replication between dc1 and dc2
+setup-replication:
+    #!/usr/bin/env bash
+    set -e
+
+    echo "🔄 Setting up PostgreSQL replication..."
+
+    # Load both instance details
+    echo "📋 Loading instance details..."
+    source {{ script_path }}/.instance_details_dc1
+    DC1_IP=$INSTANCE_IPV4
+    DC1_SSH_PORT=$INSTANCE_SSH_PORT
+    DC1_USERNAME=$INSTANCE_USERNAME
+
+    source {{ script_path }}/.instance_details_dc2
+    DC2_IP=$INSTANCE_IPV4
+    DC2_SSH_PORT=$INSTANCE_SSH_PORT
+    DC2_USERNAME=$INSTANCE_USERNAME
+
+    echo "   DC1: $DC1_IP"
+    echo "   DC2: $DC2_IP"
+
+    # Step 1: Setup postgres database on both nodes
+    echo "🗄️  Setting up postgres database on dc1..."
+    ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres"' < {{ script_path }}/sql/node1-postgres-setup.sql
+
+    echo "🗄️  Setting up postgres database on dc2..."
+    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres"' < {{ script_path }}/sql/node2-postgres-setup.sql
+
+    # Step 2: Setup my_db database with pglogical on both nodes
+    echo "🔧 Setting up my_db with pglogical on dc1..."
+    sed "s/{{NODE1_IP}}/$DC1_IP/g; s/{{NODE2_IP}}/$DC2_IP/g" {{ script_path }}/sql/node1-my_db-setup.sql | \
+        ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d my_db"'
+
+    echo "🔧 Setting up my_db with pglogical on dc2..."
+    sed "s/{{NODE1_IP}}/$DC1_IP/g; s/{{NODE2_IP}}/$DC2_IP/g" {{ script_path }}/sql/node2-my_db-setup.sql | \
+        ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d my_db"'
+
+    # Step 3: Sync replication
+    echo "🔄 Syncing replication on dc1..."
+    sed "s/{{NODE1_IP}}/$DC1_IP/g; s/{{NODE2_IP}}/$DC2_IP/g" {{ script_path }}/sql/node1-my_db-sync.sql | \
+        ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d my_db"'
+
+    echo "🔄 Syncing replication on dc2..."
+    sed "s/{{NODE1_IP}}/$DC1_IP/g; s/{{NODE2_IP}}/$DC2_IP/g" {{ script_path }}/sql/node2-my_db-sync.sql | \
+        ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d my_db"'
+
+    echo "✅ PostgreSQL replication setup complete!"
