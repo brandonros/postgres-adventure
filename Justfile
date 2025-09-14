@@ -1,8 +1,5 @@
 #!/usr/bin/env just --justfile
 
-# Cloud VM Provisioner - Justfile
-# This replicates the functionality of ./cli script
-
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set export
 
@@ -87,14 +84,44 @@ setup-replication: (wait-and-accept "dc1") (wait-and-accept "dc2")
     echo "   DC1: $DC1_IP"
     echo "   DC2: $DC2_IP"
 
+    # Wait for PostgreSQL pods to be ready
+    echo "⏳ Waiting for PostgreSQL pod on dc1 to be ready..."
+    while ! ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl get pod postgresql-0 -n postgresql 2>/dev/null | grep -q "1/1.*Running"'; do
+        echo "   Waiting for postgresql-0 pod on dc1..."
+        sleep 2
+    done
+    echo "✅ PostgreSQL pod on dc1 is ready"
+
+    echo "⏳ Waiting for PostgreSQL pod on dc2 to be ready..."
+    while ! ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl get pod postgresql-0 -n postgresql 2>/dev/null | grep -q "1/1.*Running"'; do
+        echo "   Waiting for postgresql-0 pod on dc2..."
+        sleep 2
+    done
+    echo "✅ PostgreSQL pod on dc2 is ready"
+
+    # Additional check: wait for PostgreSQL service to be actually accepting connections
+    echo "⏳ Waiting for PostgreSQL service on dc1 to accept connections..."
+    while ! ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres -c \"SELECT 1\" > /dev/null 2>&1"'; do
+        echo "   Waiting for PostgreSQL service on dc1..."
+        sleep 2
+    done
+    echo "✅ PostgreSQL service on dc1 is accepting connections"
+
+    echo "⏳ Waiting for PostgreSQL service on dc2 to accept connections..."
+    while ! ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres -c \"SELECT 1\" > /dev/null 2>&1"'; do
+        echo "   Waiting for PostgreSQL service on dc2..."
+        sleep 2
+    done
+    echo "✅ PostgreSQL service on dc2 is accepting connections"
+
     cd {{ script_path }}
 
     # Step 1: Setup postgres database on both nodes
     echo "🗄️  Setting up postgres database on dc1..."
-    ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres"' < sql/node1-postgres-setup.sql
+    cat sql/node1-postgres-setup.sql | ssh -p $DC1_SSH_PORT $DC1_USERNAME@$DC1_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres"'
 
     echo "🗄️  Setting up postgres database on dc2..."
-    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres"' < sql/node2-postgres-setup.sql
+    cat sql/node2-postgres-setup.sql | ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres"'
 
     # Step 2: Setup my_db database with pglogical on both nodes
     echo "🔧 Setting up my_db with pglogical on dc1..."
