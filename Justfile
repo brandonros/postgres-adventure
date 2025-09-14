@@ -75,7 +75,7 @@ vm:
     echo "🎉 All instance detail files created successfully!"
 
 # Wait for host and accept SSH key
-wait-and-accept:
+wait-and-accept: vm
     #!/usr/bin/env bash
     set -e
 
@@ -112,7 +112,7 @@ wait-and-accept:
     echo "✅ SSH key accepted"
 
 # Connect
-connect:
+connect: wait-and-accept
     #!/usr/bin/env bash
     set -e
 
@@ -133,26 +133,3 @@ connect:
     source "$details_file"
 
     ssh -p ${INSTANCE_SSH_PORT} ${INSTANCE_USERNAME}@${INSTANCE_IPV4}
-
-# List available instances
-list-instances:
-    #!/usr/bin/env bash
-    set -e
-    
-    echo "📋 Available instances:"
-    for details_file in {{ script_path }}/.instance_details_*; do
-        if [ -f "$details_file" ]; then
-            instance_name=$(basename "$details_file" | sed 's/\.instance_details_//')
-            source "$details_file"
-            echo "   $instance_name (${INSTANCE_IPV4}:${INSTANCE_SSH_PORT}, user: ${INSTANCE_USERNAME})"
-        fi
-    done
-
-# Clean up instance detail files
-clean-instance-files:
-    #!/usr/bin/env bash
-    set -e
-    
-    echo "🧹 Cleaning up instance detail files..."
-    rm -f {{ script_path }}/.instance_details_*
-    echo "✅ Instance detail files cleaned up"
