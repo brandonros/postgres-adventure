@@ -1,7 +1,7 @@
 -- node1 -> node2
 SELECT pglogical.create_subscription(
     subscription_name := 'sub_from_node2',
-    provider_dsn := 'host={{NODE2_IP}} port=30432 dbname=my_db user=replicator password=test',
+    provider_dsn := 'host=__NODE2_IP__ port=30432 dbname=my_db user=replicator password=test',
     forward_origins := '{}'
 );
 

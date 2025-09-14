@@ -1,4 +1,3 @@
 **/.terraform/*
-.instance_details*
 terraform.tfstate*
 .terraform.tfstate*

@@ -45,7 +45,7 @@ insert into users (name) values ('John Smith');
 -- create node1 on node1
 SELECT pglogical.create_node(
     node_name := 'node1',
-    dsn := 'host={{NODE1_IP}} port=30432 dbname=my_db user=replicator password=test'
+    dsn := 'host=__NODE1_IP__ port=30432 dbname=my_db user=replicator password=test'
 );
 
 -- replicate table
