@@ -18,7 +18,8 @@ variable "region" {
 variable "os_id" {
   description = "Operating system ID"
   type        = number
-  default     = 2136
+  default     = 2136 # Debian 12 x64 (bookworm)
+  #default     = 2625 # Debian 13 x64 (trixie)
 }
 
 variable "ssh_key_path" {
