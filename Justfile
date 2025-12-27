@@ -105,12 +105,15 @@ exec-psql instance_name database sql_file="":
     INSTANCE_USERNAME=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
     INSTANCE_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
 
+    # -e = echo queries, -v ON_ERROR_STOP=1 = stop on first error
+    PSQL_OPTS="-e -v ON_ERROR_STOP=1"
+
     if [ -z "{{ sql_file }}" ]; then
         ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP \
-            'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d {{ database }}"'
+            "KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c 'PGPASSWORD=\"Test_Password123!\" psql $PSQL_OPTS -U postgres -d {{ database }}'"
     else
         cat {{ script_path }}/{{ sql_file }} | ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP \
-            'KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d {{ database }}"'
+            "KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c 'PGPASSWORD=\"Test_Password123!\" psql $PSQL_OPTS -U postgres -d {{ database }}'"
     fi
 
 # Helper: Execute shell command on instance
@@ -216,6 +219,11 @@ setup-standby: (wait-and-accept "dc2") (wait-for-postgres "dc2")
 setup-replication: setup-primary setup-standby
     #!/usr/bin/env bash
     set -e
+
+    echo ""
+    echo "Enabling synchronous replication..."
+    echo "ALTER SYSTEM SET synchronous_standby_names = 'standby1';" | just exec-psql dc1 postgres
+    echo "SELECT pg_reload_conf();" | just exec-psql dc1 postgres
 
     echo ""
     echo "============================================"

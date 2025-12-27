@@ -17,7 +17,8 @@ data:
     max_replication_slots = 10
     max_wal_senders = 10
     synchronous_commit = on
-    synchronous_standby_names = 'standby1'
+    # synchronous_standby_names is set via ALTER SYSTEM after standby connects
+    # (if set here with no standby, all writes hang waiting for ACK)
     hot_standby = on
 
     # Connection Settings

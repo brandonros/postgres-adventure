@@ -80,6 +80,7 @@ just status
 
 # Promote standby to primary
 just failover
+just rebuild-standby dc1    # dc1 becomes standby of dc2
 ```
 
 ### Why manual failover?
