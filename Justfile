@@ -170,41 +170,19 @@ setup-standby: (wait-and-accept "dc2") (wait-for-postgres "dc2")
     ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=0'
     sleep 5
 
-    # Clear the data directory and run pg_basebackup
+    # Run pg_basebackup job (-R creates standby.signal and postgresql.auto.conf)
     echo "Running pg_basebackup to clone from primary..."
-    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-basebackup --rm -i --restart=Never --image=bitnamilegacy/postgresql:17 -- bash -c '
-        # Wait for primary to be reachable
-        until PGPASSWORD=test pg_isready -h $DC1_IP -p 30432 -U replicator; do
-            echo \"Waiting for primary...\"
-            sleep 2
-        done
 
-        # Run pg_basebackup
-        PGPASSWORD=test pg_basebackup -h $DC1_IP -p 30432 -U replicator -D /tmp/pgdata -Fp -Xs -P -R -S standby1_slot
+    # Delete any existing job first
+    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl delete job pg-basebackup -n postgresql --ignore-not-found"
 
-        # Show what was created
-        echo \"Base backup complete. Files:\"
-        ls -la /tmp/pgdata/
-        cat /tmp/pgdata/postgresql.auto.conf
-    '"
+    # Apply job with PRIMARY_HOST set
+    sed "s/PLACEHOLDER/$DC1_IP/" {{ script_path }}/manifests/pg-basebackup-job.yaml | \
+        ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl apply -f -"
 
-    # Copy the backup to the PVC
-    echo "Copying backup to PVC..."
-    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-restore --rm -i --restart=Never \
-        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-restore\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"rm -rf /bitnami/postgresql/data/* && PGPASSWORD=test pg_basebackup -h $DC1_IP -p 30432 -U replicator -D /bitnami/postgresql/data -Fp -Xs -P -R -S standby1_slot && chown -R 1001:1001 /bitnami/postgresql/data && ls -la /bitnami/postgresql/data/\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
-        -- true"
-
-    # Create standby.signal file
-    echo "Creating standby.signal..."
-    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-signal --rm -i --restart=Never \
-        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-signal\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"touch /bitnami/postgresql/data/standby.signal && echo standby.signal created && ls -la /bitnami/postgresql/data/standby.signal\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
-        -- true"
-
-    # Update primary_conninfo with correct settings
-    echo "Updating primary_conninfo..."
-    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-config --rm -i --restart=Never \
-        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-config\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"echo \\\"primary_conninfo = '\\''host=$DC1_IP port=30432 user=replicator password=test application_name=standby1'\\''\\\" > /bitnami/postgresql/data/postgresql.auto.conf && echo \\\"primary_slot_name = '\\''standby1_slot'\\''\\\" >> /bitnami/postgresql/data/postgresql.auto.conf && cat /bitnami/postgresql/data/postgresql.auto.conf\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
-        -- true"
+    # Wait for job to complete and show logs
+    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl wait --for=condition=complete job/pg-basebackup -n postgresql --timeout=300s"
+    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl logs job/pg-basebackup -n postgresql"
 
     # Scale back up
     echo "Starting PostgreSQL pod on dc2..."
@@ -344,23 +322,19 @@ rebuild-standby node:
     ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=0'
     sleep 5
 
-    # Run pg_basebackup to PVC
+    # Run pg_basebackup job (-R creates standby.signal and postgresql.auto.conf)
     echo "Running pg_basebackup from $PRIMARY..."
-    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-rebuild --rm -i --restart=Never \
-        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-rebuild\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"rm -rf /bitnami/postgresql/data/* && PGPASSWORD=test pg_basebackup -h $PRIMARY_IP -p 30432 -U replicator -D /bitnami/postgresql/data -Fp -Xs -P -R -S standby1_slot && chown -R 1001:1001 /bitnami/postgresql/data\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
-        -- true"
 
-    # Create standby.signal
-    echo "Creating standby.signal..."
-    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-signal --rm -i --restart=Never \
-        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-signal\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"touch /bitnami/postgresql/data/standby.signal\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
-        -- true"
+    # Delete any existing job first
+    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl delete job pg-basebackup -n postgresql --ignore-not-found"
 
-    # Update primary_conninfo
-    echo "Configuring primary_conninfo..."
-    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-config --rm -i --restart=Never \
-        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-config\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"echo \\\"primary_conninfo = '\\''host=$PRIMARY_IP port=30432 user=replicator password=test application_name=standby1'\\''\\\" > /bitnami/postgresql/data/postgresql.auto.conf && echo \\\"primary_slot_name = '\\''standby1_slot'\\''\\\" >> /bitnami/postgresql/data/postgresql.auto.conf\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
-        -- true"
+    # Apply job with PRIMARY_HOST set
+    sed "s/PLACEHOLDER/$PRIMARY_IP/" {{ script_path }}/manifests/pg-basebackup-job.yaml | \
+        ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl apply -f -"
+
+    # Wait for job to complete and show logs
+    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl wait --for=condition=complete job/pg-basebackup -n postgresql --timeout=300s"
+    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl logs job/pg-basebackup -n postgresql"
 
     # Start postgresql
     echo "Starting PostgreSQL on {{ node }}..."

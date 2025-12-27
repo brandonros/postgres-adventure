@@ -2,7 +2,7 @@
 -- Run on primary after postgres-setup.sql
 
 -- Users table
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) UNIQUE,
     name VARCHAR(100) NOT NULL,
@@ -11,7 +11,7 @@ CREATE TABLE users (
 );
 
 -- Orders table (FK to users)
-CREATE TABLE orders (
+CREATE TABLE IF NOT EXISTS orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id),
     total_cents INTEGER NOT NULL,
@@ -20,7 +20,7 @@ CREATE TABLE orders (
 );
 
 -- Notes table (TEXT field for testing large values)
-CREATE TABLE notes (
+CREATE TABLE IF NOT EXISTS notes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id),
     content TEXT,
