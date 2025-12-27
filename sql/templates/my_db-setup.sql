@@ -30,8 +30,23 @@ GRANT SELECT ON pg_replication_origin_status TO replicator;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO replicator;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO replicator;
 
--- set conflict resolution
-ALTER SYSTEM SET pglogical.conflict_resolution = 'error';
+-- Conflict resolution strategy for pglogical replication.
+-- Conflicts occur when the same row is modified on both nodes before replication syncs.
+-- Options:
+--   'error'            - Halt replication, require manual intervention. Use for debugging
+--                        or when conflicts indicate a bug that must be investigated.
+--   'apply_remote'     - Remote change overwrites local (default). Simple, no halts.
+--                        Risk: local changes silently lost if conflict occurs.
+--   'keep_local'       - Local change kept, remote discarded. Requires track_commit_timestamp.
+--                        Risk: remote changes silently lost.
+--   'last_update_wins' - Compare commit timestamps, newest wins. Requires track_commit_timestamp
+--                        and synchronized clocks (NTP). Most "correct" for true ordering.
+--   'first_update_wins'- Oldest timestamp wins. Rarely used; preserves original value.
+--
+-- Note: Conflicts are resolved during async replication, NOT at client commit time.
+-- The client always gets "success" on commit—conflict resolution happens later.
+-- For strong consistency, use synchronous replication or a consensus-based database.
+ALTER SYSTEM SET pglogical.conflict_resolution = 'apply_remote';
 
 -- table
 CREATE TABLE users (
