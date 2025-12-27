@@ -9,7 +9,7 @@ CREATE EXTENSION IF NOT EXISTS dblink;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'my_db') THEN
-        PERFORM dblink_exec('dbname=postgres', 'CREATE DATABASE my_db');
+        PERFORM dblink_exec('dbname=postgres user=postgres password=Test_Password123!', 'CREATE DATABASE my_db');
     END IF;
 END
 $$;
