@@ -48,10 +48,32 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO re
 -- For strong consistency, use synchronous replication or a consensus-based database.
 ALTER SYSTEM SET pglogical.conflict_resolution = 'apply_remote';
 
--- table
+-- tables
+-- Users table: UUIDs avoid PK conflicts in multi-master
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(50)
+    email VARCHAR(255) UNIQUE,  -- UNIQUE constraints can conflict!
+    name VARCHAR(100) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Orders table: FK tests replication ordering (user must exist first)
+CREATE TABLE orders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id),
+    total_cents INTEGER NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Notes table: TEXT field can trigger TOAST (out-of-line storage for large values)
+CREATE TABLE notes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id),
+    content TEXT,  -- Large values get TOAST'd
+    metadata JSONB,  -- JSONB also uses TOAST
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- insert sample data for __NODE_NAME__
@@ -65,3 +87,5 @@ SELECT pglogical.create_node(
 
 -- replicate table
 SELECT pglogical.replication_set_add_table('default', 'public.users');
+SELECT pglogical.replication_set_add_table('default', 'public.orders');
+SELECT pglogical.replication_set_add_table('default', 'public.notes');
