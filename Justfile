@@ -211,18 +211,38 @@ setup-replication: setup-primary setup-standby
     echo "Checking replication status..."
     just status
 
-# Check replication status
+# Check replication status (auto-detects topology)
 status:
     #!/usr/bin/env bash
     set -e
 
-    echo ""
-    echo "=== Primary (dc1) - pg_stat_replication ==="
-    just exec-psql dc1 postgres sql/templates/verify-replication.sql || true
+    # Detect current topology
+    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+
+    if [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "t" ]; then
+        PRIMARY="dc1"
+        STANDBY="dc2"
+    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "t" ]; then
+        PRIMARY="dc2"
+        STANDBY="dc1"
+    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "f" ]; then
+        echo "WARNING: Both nodes are primaries (split-brain)"
+        PRIMARY="dc1"
+        STANDBY="dc2"
+    else
+        echo "WARNING: Could not determine topology"
+        PRIMARY="dc1"
+        STANDBY="dc2"
+    fi
 
     echo ""
-    echo "=== Standby (dc2) - pg_stat_wal_receiver ==="
-    echo "SELECT * FROM pg_stat_wal_receiver;" | just exec-psql dc2 postgres || true
+    echo "=== Primary ($PRIMARY) - pg_stat_replication ==="
+    just exec-psql $PRIMARY postgres sql/templates/verify-replication.sql || true
+
+    echo ""
+    echo "=== Standby ($STANDBY) - pg_stat_wal_receiver ==="
+    echo "SELECT * FROM pg_stat_wal_receiver;" | just exec-psql $STANDBY postgres || true
 
 # Manual failover - promote standby to primary (idempotent, bidirectional)
 failover:
@@ -267,15 +287,22 @@ failover:
     just status
 
     echo ""
-    echo "Step 2: Promoting $STANDBY to primary..."
+    echo "Step 2: Stopping old primary ($PRIMARY) to prevent split-brain..."
+    cd {{ script_path }}/terraform
+    PRIMARY_IP=$(terraform output -json instance_ipv4s | jq -r ".[\"$PRIMARY\"]")
+    PRIMARY_USERNAME=$(terraform output -json instance_usernames | jq -r ".[\"$PRIMARY\"]")
+    PRIMARY_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r ".[\"$PRIMARY\"]")
+    ssh -p $PRIMARY_SSH_PORT $PRIMARY_USERNAME@$PRIMARY_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=0'
+
+    echo ""
+    echo "Step 3: Promoting $STANDBY to primary..."
     echo "SELECT pg_promote();" | just exec-psql $STANDBY postgres
 
     echo ""
-    echo "Failover complete! $STANDBY is now primary."
+    echo "Failover complete! $STANDBY is now primary, $PRIMARY is stopped."
     echo ""
-    echo "IMPORTANT:"
-    echo "  1. Update application connection strings to point to $STANDBY"
-    echo "  2. Rebuild $PRIMARY as standby: just rebuild-standby $PRIMARY"
+    echo "Next step: Rebuild $PRIMARY as standby:"
+    echo "  just rebuild-standby $PRIMARY"
 
 # Rebuild a node as standby of the current primary
 rebuild-standby node:
@@ -290,17 +317,21 @@ rebuild-standby node:
     DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
     DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
 
-    if [ "$DC1_IN_RECOVERY" = "f" ]; then
+    if [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "t" ]; then
         PRIMARY="dc1"
-    elif [ "$DC2_IN_RECOVERY" = "f" ]; then
+    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "t" ]; then
         PRIMARY="dc2"
+    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "f" ]; then
+        # Split-brain: the node we're NOT rebuilding becomes the primary
+        if [ "{{ node }}" = "dc1" ]; then
+            PRIMARY="dc2"
+            echo "WARNING: Split-brain detected. Treating dc2 as primary."
+        else
+            PRIMARY="dc1"
+            echo "WARNING: Split-brain detected. Treating dc1 as primary."
+        fi
     else
-        echo "ERROR: Could not find a primary node."
-        exit 1
-    fi
-
-    if [ "{{ node }}" = "$PRIMARY" ]; then
-        echo "ERROR: {{ node }} is the current primary. Cannot rebuild primary as standby."
+        echo "ERROR: Could not find a primary node (both in recovery or unreachable)."
         exit 1
     fi
 
@@ -321,6 +352,10 @@ rebuild-standby node:
     echo "Stopping PostgreSQL on {{ node }}..."
     ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=0'
     sleep 5
+
+    # Ensure replication slot exists on primary (may not exist after failover)
+    echo "Ensuring replication slot exists on $PRIMARY..."
+    echo "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_replication_slots WHERE slot_name = 'standby1_slot') THEN PERFORM pg_create_physical_replication_slot('standby1_slot'); END IF; END \$\$;" | just exec-psql $PRIMARY postgres
 
     # Run pg_basebackup job (-R creates standby.signal and postgresql.auto.conf)
     echo "Running pg_basebackup from $PRIMARY..."
@@ -364,13 +399,20 @@ insert-test:
     #!/usr/bin/env bash
     set -e
 
-    # Find the primary
+    # Find the primary (check both nodes to detect split-brain)
     DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
 
-    if [ "$DC1_IN_RECOVERY" = "f" ]; then
+    if [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "t" ]; then
         PRIMARY="dc1"
-    else
+    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "t" ]; then
         PRIMARY="dc2"
+    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "f" ]; then
+        echo "ERROR: Both nodes are primaries (split-brain). Run 'just rebuild-standby <node>' first."
+        exit 1
+    else
+        echo "ERROR: Could not determine primary. Check node connectivity."
+        exit 1
     fi
 
     echo "Inserting test row on primary ($PRIMARY)..."

@@ -30,6 +30,12 @@ spec:
                 -Fp -Xs -P -R \
                 -S standby1_slot
 
+              # Rewrite postgresql.auto.conf to only have correct settings
+              # (pg_basebackup copies source's old config then appends new one)
+              echo "Fixing postgresql.auto.conf..."
+              echo "primary_conninfo = 'host=$PRIMARY_HOST port=30432 user=replicator password=test application_name=walreceiver'" > /var/lib/postgresql/data/pgdata/postgresql.auto.conf
+              echo "primary_slot_name = 'standby1_slot'" >> /var/lib/postgresql/data/pgdata/postgresql.auto.conf
+
               echo "Setting permissions..."
               chown -R 999:999 /var/lib/postgresql/data/pgdata
 
