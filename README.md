@@ -31,6 +31,41 @@ When the same row is modified on both nodes before replication syncs, pglogical 
 
 All options except `error` silently discard one version of the data. This is the tradeoff for availability.
 
+## Why pglogical?
+
+PostgreSQL has built-in replication, but it doesn't support multi-master out of the box:
+
+| Type | Since | Extension | Multi-Master | CAP |
+|------|-------|-----------|--------------|-----|
+| Streaming replication (physical) | 9.0 | No | No (read-only standbys) | CP (if sync) |
+| Logical replication (native) | 10 | No | No (one-way pub/sub) | AP |
+| pglogical | - | Yes | Yes | AP |
+
+### Built-in streaming replication
+
+```
+Primary → WAL bytes → Standby (read-only)
+```
+
+Ships raw WAL (Write-Ahead Log) bytes. Standby is read-only. Can be synchronous for CP guarantees. This is what most production HA setups use (Patroni, pg_auto_failover).
+
+### Built-in logical replication (PostgreSQL 10+)
+
+```sql
+CREATE PUBLICATION my_pub FOR TABLE users;      -- on publisher
+CREATE SUBSCRIPTION my_sub CONNECTION '...' PUBLICATION my_pub;  -- on subscriber
+```
+
+Row-level changes, one-way only. Can replicate a subset of tables, cross major versions.
+
+### pglogical adds
+
+- **Bidirectional replication** (both nodes accept writes)
+- **Conflict resolution** (what to do when same row modified on both)
+- Works on older PostgreSQL versions
+
+If you don't need multi-master, use built-in replication. It's simpler and (for streaming) can be CP.
+
 ## Technologies used
 
 * GitHub Actions
