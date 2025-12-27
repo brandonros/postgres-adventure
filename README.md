@@ -67,6 +67,37 @@ Both nodes accept writes simultaneously. Changes replicate bidirectionally. This
 
 **Tradeoff**: Higher availability (either DC can serve writes), but conflicts are possible when the same row is modified on both nodes before sync. Conflict resolution is always async—clients get "success" before replication happens. This is AP.
 
+### PostgreSQL AP options
+
+| Method | Built-in | Multi-Master | Notes |
+|--------|----------|--------------|-------|
+| Async streaming replication | Yes | No | Standby can lag; data loss possible on failover |
+| Native logical replication | Yes (PG10+) | No | One-way pub/sub, async |
+| pglogical | Extension | Yes | Bidirectional, conflict resolution (this project) |
+| BDR | Commercial | Yes | Enterprise version of pglogical (EDB) |
+
+### PostgreSQL CP options
+
+| Method | Built-in | Multi-Master | Notes |
+|--------|----------|--------------|-------|
+| Sync streaming replication | Yes | No | `synchronous_commit=on`, blocks until standby ACKs |
+| Patroni (sync mode) | No | No | HA orchestration with sync streaming |
+| pg_auto_failover | No | No | Automatic failover with sync replication |
+
+CP requires Primary-Standby topology—there's no way to get CP with multi-master in PostgreSQL.
+
+### Consensus-based alternatives
+
+For true CP with multi-master writes, you need a database designed around distributed consensus (Raft, Paxos):
+
+| System | Protocol | Postgres-compatible | Notes |
+|--------|----------|---------------------|-------|
+| CockroachDB | Raft | Yes (wire protocol) | Distributed SQL, serializable by default |
+| YugabyteDB | Raft | Yes (wire protocol) | Distributed SQL, Postgres-compatible |
+| Spanner | Paxos + TrueTime | No | Google Cloud only, atomic clocks |
+
+These systems coordinate writes across nodes *before* committing, so all nodes agree on the order of operations. The tradeoff is latency—every write requires a network round-trip for consensus.
+
 ## Why pglogical?
 
 PostgreSQL has built-in replication, but it doesn't support multi-master out of the box:
