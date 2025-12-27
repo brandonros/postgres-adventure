@@ -169,7 +169,7 @@ setup-standby: (wait-and-accept "dc2") (wait-for-postgres "dc2")
 
     # Clear the data directory and run pg_basebackup
     echo "Running pg_basebackup to clone from primary..."
-    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-basebackup --rm -i --restart=Never --image=bitnami/postgresql:17 -- bash -c '
+    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-basebackup --rm -i --restart=Never --image=bitnamilegacy/postgresql:17 -- bash -c '
         # Wait for primary to be reachable
         until PGPASSWORD=test pg_isready -h $DC1_IP -p 30432 -U replicator; do
             echo \"Waiting for primary...\"
@@ -188,19 +188,19 @@ setup-standby: (wait-and-accept "dc2") (wait-for-postgres "dc2")
     # Copy the backup to the PVC
     echo "Copying backup to PVC..."
     ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-restore --rm -i --restart=Never \
-        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-restore\",\"image\":\"bitnami/postgresql:17\",\"command\":[\"bash\",\"-c\",\"rm -rf /bitnami/postgresql/data/* && PGPASSWORD=test pg_basebackup -h $DC1_IP -p 30432 -U replicator -D /bitnami/postgresql/data -Fp -Xs -P -R -S standby1_slot && chown -R 1001:1001 /bitnami/postgresql/data && ls -la /bitnami/postgresql/data/\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
+        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-restore\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"rm -rf /bitnami/postgresql/data/* && PGPASSWORD=test pg_basebackup -h $DC1_IP -p 30432 -U replicator -D /bitnami/postgresql/data -Fp -Xs -P -R -S standby1_slot && chown -R 1001:1001 /bitnami/postgresql/data && ls -la /bitnami/postgresql/data/\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
         -- true"
 
     # Create standby.signal file
     echo "Creating standby.signal..."
     ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-signal --rm -i --restart=Never \
-        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-signal\",\"image\":\"bitnami/postgresql:17\",\"command\":[\"bash\",\"-c\",\"touch /bitnami/postgresql/data/standby.signal && echo standby.signal created && ls -la /bitnami/postgresql/data/standby.signal\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
+        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-signal\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"touch /bitnami/postgresql/data/standby.signal && echo standby.signal created && ls -la /bitnami/postgresql/data/standby.signal\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
         -- true"
 
     # Update primary_conninfo with correct settings
     echo "Updating primary_conninfo..."
     ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-config --rm -i --restart=Never \
-        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-config\",\"image\":\"bitnami/postgresql:17\",\"command\":[\"bash\",\"-c\",\"echo \\\"primary_conninfo = '\\''host=$DC1_IP port=30432 user=replicator password=test application_name=standby1'\\''\\\" > /bitnami/postgresql/data/postgresql.auto.conf && echo \\\"primary_slot_name = '\\''standby1_slot'\\''\\\" >> /bitnami/postgresql/data/postgresql.auto.conf && cat /bitnami/postgresql/data/postgresql.auto.conf\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
+        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-config\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"echo \\\"primary_conninfo = '\\''host=$DC1_IP port=30432 user=replicator password=test application_name=standby1'\\''\\\" > /bitnami/postgresql/data/postgresql.auto.conf && echo \\\"primary_slot_name = '\\''standby1_slot'\\''\\\" >> /bitnami/postgresql/data/postgresql.auto.conf && cat /bitnami/postgresql/data/postgresql.auto.conf\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
         -- true"
 
     # Scale back up
@@ -238,7 +238,7 @@ status:
     echo "=== Standby (dc2) - pg_stat_wal_receiver ==="
     echo "SELECT * FROM pg_stat_wal_receiver;" | just exec-psql dc2 postgres || true
 
-# Manual failover - promote standby to primary
+# Manual failover - promote standby to primary (idempotent, bidirectional)
 failover:
     #!/usr/bin/env bash
     set -e
@@ -246,18 +246,123 @@ failover:
     echo "MANUAL FAILOVER PROCEDURE"
     echo "========================="
     echo ""
+
+    # Check both nodes to determine current topology
+    echo "Detecting current topology..."
+    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+
+    echo "  dc1 in recovery: $DC1_IN_RECOVERY"
+    echo "  dc2 in recovery: $DC2_IN_RECOVERY"
+    echo ""
+
+    # Determine which node to promote
+    if [ "$DC1_IN_RECOVERY" = "t" ] && [ "$DC2_IN_RECOVERY" = "f" ]; then
+        STANDBY="dc1"
+        PRIMARY="dc2"
+    elif [ "$DC2_IN_RECOVERY" = "t" ] && [ "$DC1_IN_RECOVERY" = "f" ]; then
+        STANDBY="dc2"
+        PRIMARY="dc1"
+    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "f" ]; then
+        echo "ERROR: Both nodes are primaries (split-brain). Manual intervention required."
+        exit 1
+    elif [ "$DC1_IN_RECOVERY" = "t" ] && [ "$DC2_IN_RECOVERY" = "t" ]; then
+        echo "ERROR: Both nodes are standbys. No primary available."
+        exit 1
+    else
+        echo "ERROR: Could not determine topology. Check node connectivity."
+        exit 1
+    fi
+
+    echo "Current topology: $PRIMARY is primary, $STANDBY is standby"
+    echo ""
+
     echo "Step 1: Verify standby is caught up..."
     just status
 
     echo ""
-    echo "Step 2: Promoting standby (dc2) to primary..."
-    echo "SELECT pg_promote();" | just exec-psql dc2 postgres
+    echo "Step 2: Promoting $STANDBY to primary..."
+    echo "SELECT pg_promote();" | just exec-psql $STANDBY postgres
 
     echo ""
-    echo "Failover complete!"
+    echo "Failover complete! $STANDBY is now primary."
     echo ""
-    echo "IMPORTANT: Update your application connection strings to point to dc2."
-    echo "The old primary (dc1) should be rebuilt as a standby or decommissioned."
+    echo "IMPORTANT:"
+    echo "  1. Update application connection strings to point to $STANDBY"
+    echo "  2. Rebuild $PRIMARY as standby: just rebuild-standby $PRIMARY"
+
+# Rebuild a node as standby of the current primary
+rebuild-standby node:
+    #!/usr/bin/env bash
+    set -e
+
+    echo "REBUILD STANDBY: {{ node }}"
+    echo "=========================="
+    echo ""
+
+    # Determine which node is the current primary
+    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+
+    if [ "$DC1_IN_RECOVERY" = "f" ]; then
+        PRIMARY="dc1"
+    elif [ "$DC2_IN_RECOVERY" = "f" ]; then
+        PRIMARY="dc2"
+    else
+        echo "ERROR: Could not find a primary node."
+        exit 1
+    fi
+
+    if [ "{{ node }}" = "$PRIMARY" ]; then
+        echo "ERROR: {{ node }} is the current primary. Cannot rebuild primary as standby."
+        exit 1
+    fi
+
+    echo "Primary is: $PRIMARY"
+    echo "Rebuilding {{ node }} as standby..."
+    echo ""
+
+    cd {{ script_path }}/terraform
+    PRIMARY_IP=$(terraform output -json instance_ipv4s | jq -r ".[\"$PRIMARY\"]")
+    NODE_IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ node }}"]')
+    NODE_USERNAME=$(terraform output -json instance_usernames | jq -r '.["{{ node }}"]')
+    NODE_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ node }}"]')
+
+    echo "Primary IP: $PRIMARY_IP"
+    echo "Target IP: $NODE_IP"
+
+    # Stop postgresql on target
+    echo "Stopping PostgreSQL on {{ node }}..."
+    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=0'
+    sleep 5
+
+    # Run pg_basebackup to PVC
+    echo "Running pg_basebackup from $PRIMARY..."
+    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-rebuild --rm -i --restart=Never \
+        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-rebuild\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"rm -rf /bitnami/postgresql/data/* && PGPASSWORD=test pg_basebackup -h $PRIMARY_IP -p 30432 -U replicator -D /bitnami/postgresql/data -Fp -Xs -P -R -S standby1_slot && chown -R 1001:1001 /bitnami/postgresql/data\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
+        -- true"
+
+    # Create standby.signal
+    echo "Creating standby.signal..."
+    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-signal --rm -i --restart=Never \
+        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-signal\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"touch /bitnami/postgresql/data/standby.signal\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
+        -- true"
+
+    # Update primary_conninfo
+    echo "Configuring primary_conninfo..."
+    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl run pg-config --rm -i --restart=Never \
+        --overrides='{\"spec\":{\"containers\":[{\"name\":\"pg-config\",\"image\":\"bitnamilegacy/postgresql:17\",\"command\":[\"bash\",\"-c\",\"echo \\\"primary_conninfo = '\\''host=$PRIMARY_IP port=30432 user=replicator password=test application_name=standby1'\\''\\\" > /bitnami/postgresql/data/postgresql.auto.conf && echo \\\"primary_slot_name = '\\''standby1_slot'\\''\\\" >> /bitnami/postgresql/data/postgresql.auto.conf\"],\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/bitnami/postgresql\"}]}],\"volumes\":[{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"data-postgresql-0\"}}]}}' \
+        -- true"
+
+    # Start postgresql
+    echo "Starting PostgreSQL on {{ node }}..."
+    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=1'
+
+    just wait-for-postgres {{ node }}
+
+    echo ""
+    echo "{{ node }} rebuilt as standby of $PRIMARY"
+    just status
 
 # Verify data is replicated
 verify-data:
@@ -265,18 +370,27 @@ verify-data:
     set -e
 
     echo ""
-    echo "=== Data on Primary (dc1) ==="
-    echo "SELECT * FROM users; SELECT * FROM orders;" | just exec-psql dc1 my_db
+    echo "=== Data on dc1 ==="
+    echo "SELECT * FROM users; SELECT * FROM orders;" | just exec-psql dc1 my_db || true
 
     echo ""
-    echo "=== Data on Standby (dc2) ==="
-    echo "SELECT * FROM users; SELECT * FROM orders;" | just exec-psql dc2 my_db
+    echo "=== Data on dc2 ==="
+    echo "SELECT * FROM users; SELECT * FROM orders;" | just exec-psql dc2 my_db || true
 
-# Insert test data on primary
+# Insert test data on current primary
 insert-test:
     #!/usr/bin/env bash
     set -e
 
-    echo "Inserting test row on primary (dc1)..."
-    echo "INSERT INTO users (email, name) VALUES ('test-$(date +%s)@example.com', 'Test User');" | just exec-psql dc1 my_db
+    # Find the primary
+    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+
+    if [ "$DC1_IN_RECOVERY" = "f" ]; then
+        PRIMARY="dc1"
+    else
+        PRIMARY="dc2"
+    fi
+
+    echo "Inserting test row on primary ($PRIMARY)..."
+    echo "INSERT INTO users (email, name) VALUES ('test-$(date +%s)@example.com', 'Test User');" | just exec-psql $PRIMARY my_db
     echo "Done. Run 'just verify-data' to see replication."

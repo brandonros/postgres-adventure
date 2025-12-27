@@ -160,7 +160,7 @@ spec:
 
       containers:
         - name: postgresql
-          image: bitnami/postgresql:17
+          image: bitnamilegacy/postgresql:17
           ports:
             - name: postgresql
               containerPort: 5432
