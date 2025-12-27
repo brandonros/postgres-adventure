@@ -18,6 +18,15 @@ vm:
     terraform apply -auto-approve
     echo "✅ Infrastructure provisioned successfully!"
 
+# Destroy all infrastructure
+destroy:
+    #!/usr/bin/env bash
+    set -e
+    echo "🗑️  Destroying VM infrastructure..."
+    cd {{ script_path }}/terraform
+    terraform destroy -auto-approve
+    echo "✅ Infrastructure destroyed!"
+
 # Wait for host and accept SSH key
 wait-and-accept instance_name: vm
     #!/usr/bin/env bash
