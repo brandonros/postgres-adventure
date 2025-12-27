@@ -14,7 +14,7 @@ variable "instances" {
     dc2 = {
      hostname = "dc2"
      plan   = "vc2-2c-4gb"
-     region = "atl"
+     region = "dfw"
     }
   }
 }
