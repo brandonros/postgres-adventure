@@ -10,6 +10,13 @@ Proof of concept active-active PostgreSQL replication across two datacenters usi
 
 ## Important: CAP theorem implications
 
+The CAP theorem states distributed databases can only guarantee two of three properties:
+- **C**onsistency: All nodes see the same data at the same time
+- **A**vailability: Every request gets a response (even during failures)
+- **P**artition tolerance: System works despite network failures between nodes
+
+Since network partitions *will* happen, real systems choose either CP (consistent but may reject writes during partitions) or AP (available but may have temporary inconsistencies).
+
 This setup is **AP** (Available + Partition-tolerant), **not CP** (Consistent + Partition-tolerant).
 
 | What this means | Implication |
@@ -30,6 +37,35 @@ When the same row is modified on both nodes before replication syncs, pglogical 
 - `error` - Halt replication, require manual fix
 
 All options except `error` silently discard one version of the data. This is the tradeoff for availability.
+
+## Replication topologies
+
+Database replication keeps copies of data on multiple servers for high availability (survive failures), disaster recovery (survive datacenter loss), and read scaling (distribute query load).
+
+Two common patterns:
+
+### Primary-Standby (Active-Passive)
+
+```
+Primary (writes) → Standby (read-only)
+                 → Standby (read-only)
+```
+
+One node accepts all writes. Standbys receive replicated data and handle read traffic. On primary failure, a standby is promoted. This is what most production databases use (banks, fintech, etc.) because it avoids conflicts entirely—there's only one source of truth at any moment.
+
+**Replication modes:**
+- **Async**: Primary commits immediately, replicates later. Fast, but standby may lag behind. Risk: data loss if primary dies before replication.
+- **Sync**: Primary waits for standby acknowledgment before commit returns. Slower, but guarantees zero data loss on failover. This is CP.
+
+### Active-Active (Multi-Master)
+
+```
+Node A (writes) ⇄ Node B (writes)
+```
+
+Both nodes accept writes simultaneously. Changes replicate bidirectionally. This is what pglogical enables.
+
+**Tradeoff**: Higher availability (either DC can serve writes), but conflicts are possible when the same row is modified on both nodes before sync. Conflict resolution is always async—clients get "success" before replication happens. This is AP.
 
 ## Why pglogical?
 
