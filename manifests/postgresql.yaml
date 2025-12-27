@@ -160,33 +160,35 @@ spec:
             - /bin/sh
             - -c
             - |
-              echo "Setting up PostgreSQL config directory..."
-              mkdir -p /bitnami/postgresql/conf
-              cp /config-source/postgresql.conf /bitnami/postgresql/conf/postgresql.conf
-              cp /config-source/pg_hba.conf /bitnami/postgresql/conf/pg_hba.conf
-              chown -R 1001:1001 /bitnami/postgresql/conf
-              chmod 644 /bitnami/postgresql/conf/postgresql.conf
-              chmod 644 /bitnami/postgresql/conf/pg_hba.conf
+              echo "Setting up PostgreSQL config..."
+              cp /config-source/postgresql.conf /var/lib/postgresql/data/postgresql.conf
+              cp /config-source/pg_hba.conf /var/lib/postgresql/data/pg_hba.conf
+              # Don't chown - official image handles permissions
               echo "Config setup complete"
           volumeMounts:
             - name: postgresql-config
               mountPath: /config-source
             - name: postgres-data
-              mountPath: /bitnami/postgresql
+              mountPath: /var/lib/postgresql/data
 
       containers:
         - name: postgresql
-          image: bitnamilegacy/postgresql:17
+          image: postgres:17
+          args:
+            - -c
+            - config_file=/var/lib/postgresql/data/postgresql.conf
+            - -c
+            - hba_file=/var/lib/postgresql/data/pg_hba.conf
           ports:
             - name: postgresql
               containerPort: 5432
           env:
-            - name: POSTGRESQL_PASSWORD
+            - name: POSTGRES_PASSWORD
               value: "Test_Password123!"
-            - name: POSTGRESQL_DATABASE
+            - name: POSTGRES_DB
               value: "postgres"
-            - name: POSTGRESQL_USERNAME
-              value: "postgres"
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
           resources:
             requests:
               cpu: "1"
@@ -196,9 +198,7 @@ spec:
               memory: "4Gi"
           volumeMounts:
             - name: postgres-data
-              mountPath: /bitnami/postgresql
-            - name: postgresql-config
-              mountPath: /bitnami/postgresql/conf
+              mountPath: /var/lib/postgresql/data
 
       volumes:
         - name: postgresql-config

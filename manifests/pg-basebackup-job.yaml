@@ -12,35 +12,38 @@ spec:
         runAsUser: 0
       containers:
         - name: pg-basebackup
-          image: bitnamilegacy/postgresql:17
+          image: postgres:17
           command:
             - bash
             - -c
             - |
               set -e
               echo "Clearing data directory..."
-              rm -rf /bitnami/postgresql/data/*
+              rm -rf /var/lib/postgresql/data/pgdata/*
 
               echo "Running pg_basebackup from $PRIMARY_HOST..."
               PGPASSWORD=test pg_basebackup \
                 -h "$PRIMARY_HOST" \
                 -p 30432 \
                 -U replicator \
-                -D /bitnami/postgresql/data \
+                -D /var/lib/postgresql/data/pgdata \
                 -Fp -Xs -P -R \
                 -S standby1_slot
 
               echo "Setting permissions..."
-              chown -R 1001:1001 /bitnami/postgresql/data
+              chown -R 999:999 /var/lib/postgresql/data/pgdata
 
               echo "Done. postgresql.auto.conf:"
-              cat /bitnami/postgresql/data/postgresql.auto.conf
+              cat /var/lib/postgresql/data/pgdata/postgresql.auto.conf
+
+              echo "standby.signal:"
+              ls -la /var/lib/postgresql/data/pgdata/standby.signal
           env:
             - name: PRIMARY_HOST
               value: "PLACEHOLDER"
           volumeMounts:
             - name: data
-              mountPath: /bitnami/postgresql
+              mountPath: /var/lib/postgresql/data
       volumes:
         - name: data
           persistentVolumeClaim:

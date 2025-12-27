@@ -110,7 +110,7 @@ For automatic failover, use tools like Patroni or pg_auto_failover (not included
 * cloud-init - https://cloud-init.io/
 * k3s (Kubernetes) - https://github.com/k3s-io/k3s
 * Docker
-* PostgreSQL 17 (stock bitnami image) - https://hub.docker.com/r/bitnami/postgresql
+* PostgreSQL 17 (official image) - https://hub.docker.com/_/postgres
 * just (Justfile) - https://github.com/casey/just
 
 ## How to use

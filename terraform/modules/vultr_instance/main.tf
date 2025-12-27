@@ -48,7 +48,7 @@ runcmd:
   - echo "export KUBECONFIG=/home/debian/.kube/config" >> /home/debian/.bashrc
   # install k9s
   - curl -L -O https://github.com/derailed/k9s/releases/download/v0.50.9/k9s_linux_amd64.deb && apt install -y ./k9s_linux_*.deb && rm k9s_linux_*.deb
-  # install postgres (CP branch - streaming replication with stock bitnami image)
+  # install postgres (CP branch - streaming replication with official postgres image)
   - curl -L -O https://raw.githubusercontent.com/brandonros/postgres-adventure/cp/manifests/postgresql.yaml && kubectl apply -f postgresql.yaml && rm postgresql.yaml
 EOF
 }
