@@ -1,14 +1,28 @@
-# postgres-adventure
+# postgres-adventure (CP branch)
 
-Proof of concept active-active PostgreSQL replication across two datacenters using pglogical.
+Proof of concept **synchronous streaming replication** with manual failover.
+
+**See the [main branch](https://github.com/brandonros/postgres-adventure/tree/main) for the AP (active-active pglogical) setup.**
 
 ## What this demonstrates
 
-- Bidirectional logical replication between two PostgreSQL instances
-- Both nodes can accept writes simultaneously
-- Automatic conflict resolution when the same row is modified on both nodes
+- Primary-Standby topology with synchronous replication
+- Zero data loss guarantee (synchronous commit)
+- Hot standby (read-only queries on standby)
+- Manual failover via `pg_promote()`
 
-## Important: CAP theorem implications
+## Architecture
+
+```
+dc1 (Primary)  ──WAL──>  dc2 (Standby)
+   writes                 read-only
+```
+
+- **dc1**: Primary node, accepts all writes
+- **dc2**: Hot standby, receives WAL stream, read-only queries allowed
+- **Synchronous**: Primary waits for standby ACK before commit returns
+
+## CAP theorem
 
 The CAP theorem states distributed databases can only guarantee two of three properties:
 - **C**onsistency: All nodes see the same data at the same time
@@ -17,162 +31,124 @@ The CAP theorem states distributed databases can only guarantee two of three pro
 
 Since network partitions *will* happen, real systems choose either CP (consistent but may reject writes during partitions) or AP (available but may have temporary inconsistencies).
 
-This setup is **AP** (Available + Partition-tolerant), **not CP** (Consistent + Partition-tolerant).
+**This setup is CP** (Consistent + Partition-tolerant):
 
-| What this means | Implication |
-|-----------------|-------------|
-| Both nodes stay writable during a network partition | High availability |
-| Conflicts are resolved asynchronously after commit | Client gets "success" before replication happens |
-| No distributed transactions or consensus protocol | Cannot guarantee consistency across nodes |
+| Property | Behavior |
+|----------|----------|
+| Consistency | Guaranteed - standby always has committed data |
+| Availability | Sacrificed - writes block if standby unreachable |
+| Partition tolerance | Yes - system handles network failures |
 
-**pglogical is structurally AP.** There is no configuration that makes it CP. If you need strong consistency (e.g., financial transactions), use synchronous streaming replication or a consensus-based database (CockroachDB, YugabyteDB, Spanner).
+When the standby is unreachable, the primary will **block writes** rather than risk data loss. This is the CP tradeoff.
 
-### Conflict resolution
+## How synchronous streaming replication works
 
-When the same row is modified on both nodes before replication syncs, pglogical resolves conflicts using one of:
+1. Client sends `INSERT` to primary
+2. Primary writes to WAL (Write-Ahead Log)
+3. Primary streams WAL to standby
+4. Standby writes WAL to disk and ACKs
+5. Primary commits and returns success to client
 
-- `apply_remote` - Remote wins (default, used here)
-- `keep_local` - Local wins
-- `last_update_wins` - Newest timestamp wins
-- `error` - Halt replication, require manual fix
+The key is step 4-5: the primary **waits for standby acknowledgment** before telling the client the transaction succeeded. If the standby is down, writes block.
 
-All options except `error` silently discard one version of the data. This is the tradeoff for availability.
-
-## Replication topologies
-
-Database replication keeps copies of data on multiple servers for high availability (survive failures), disaster recovery (survive datacenter loss), and read scaling (distribute query load).
-
-Two common patterns:
-
-### Primary-Standby (Active-Passive)
+### Key configuration
 
 ```
-Primary (writes) → Standby (read-only)
-                 → Standby (read-only)
+# Primary postgresql.conf
+wal_level = replica
+synchronous_commit = on
+synchronous_standby_names = 'standby1'
+
+# Standby (created by pg_basebackup)
+primary_conninfo = 'host=<primary> user=replicator application_name=standby1'
+primary_slot_name = 'standby1_slot'
 ```
 
-One node accepts all writes. Standbys receive replicated data and handle read traffic. On primary failure, a standby is promoted. This is what most production databases use (banks, fintech, etc.) because it avoids conflicts entirely—there's only one source of truth at any moment.
+## Manual failover procedure
 
-**Replication modes:**
-- **Async**: Primary commits immediately, replicates later. Fast, but standby may lag behind. Risk: data loss if primary dies before replication.
-- **Sync**: Primary waits for standby acknowledgment before commit returns. Slower, but guarantees zero data loss on failover. This is CP.
+This setup uses **manual failover**. When the primary fails:
 
-### Active-Active (Multi-Master)
+1. Verify standby is caught up (check `pg_stat_replication`)
+2. Stop writes to primary (application-level)
+3. Promote standby: `SELECT pg_promote();`
+4. Update application connection strings to point to new primary
+5. (Optional) Rebuild old primary as new standby
 
-```
-Node A (writes) ⇄ Node B (writes)
-```
+```shell
+# Check replication status
+just status
 
-Both nodes accept writes simultaneously. Changes replicate bidirectionally. This is what pglogical enables.
-
-**Tradeoff**: Higher availability (either DC can serve writes), but conflicts are possible when the same row is modified on both nodes before sync. Conflict resolution is always async—clients get "success" before replication happens. This is AP.
-
-### PostgreSQL AP options
-
-| Method | Built-in | Multi-Master | Notes |
-|--------|----------|--------------|-------|
-| Async streaming replication | Yes | No | Standby can lag; data loss possible on failover |
-| Native logical replication | Yes (PG10+) | No | One-way pub/sub, async |
-| pglogical | Extension | Yes | Bidirectional, conflict resolution (this project) |
-| BDR | Commercial | Yes | Enterprise version of pglogical (EDB) |
-
-### PostgreSQL CP options
-
-| Method | What it is | Automatic Failover | Notes |
-|--------|------------|-------------------|-------|
-| Sync streaming replication | Built-in feature | No | Raw capability; if primary dies, you manually promote standby |
-| Patroni (sync mode) | HA orchestration | Yes | Requires etcd/Consul/ZK for leader election; battle-tested, complex |
-| pg_auto_failover | HA orchestration | Yes | Simpler than Patroni; uses monitor node instead of external consensus |
-
-**Sync streaming** is the underlying mechanism—Patroni and pg_auto_failover are wrappers that add automatic failover on top of it. Without them, an operator must manually detect failure and promote a standby.
-
-CP requires Primary-Standby topology—there's no way to get CP with multi-master in PostgreSQL.
-
-### Why external tools?
-
-PostgreSQL provides the replication engine but **not** high availability orchestration:
-
-| PostgreSQL provides | External tools provide |
-|---------------------|------------------------|
-| Replication mechanisms (streaming, logical) | Failure detection (is primary dead or just slow?) |
-| Promotion command (`pg_promote()`) | Automatic promotion decision (which standby?) |
-| | Fencing (preventing split-brain) |
-
-The reasoning: failure detection and leader election are hard distributed systems problems that require consensus. PostgreSQL's philosophy is "do one thing well" (be a database engine).
-
-```
-PostgreSQL (replication engine)
-     ↑
-Patroni / pg_auto_failover / repmgr (HA orchestration)
-     ↑
-etcd / Consul / ZooKeeper (consensus for leader election)
+# Promote standby to primary
+just failover
 ```
 
-This differs from MySQL Group Replication or SQL Server Always On, which bake HA logic into the database. PostgreSQL makes you assemble the stack, but gives you flexibility in how you do it.
+### Why manual failover?
 
-### Consensus-based alternatives
+For critical workloads (banks, fintech), manual failover is often preferred:
+- Operators verify the situation before acting
+- No risk of split-brain from automated decisions
+- Downtime is acceptable; data loss is not
 
-For true CP with multi-master writes, you need a database designed around distributed consensus (Raft, Paxos):
+For automatic failover, use tools like Patroni or pg_auto_failover (not included here).
 
-| System | Protocol | Postgres-compatible | Notes |
-|--------|----------|---------------------|-------|
-| CockroachDB | Raft | Yes (wire protocol) | Distributed SQL, serializable by default |
-| YugabyteDB | Raft | Yes (wire protocol) | Distributed SQL, Postgres-compatible |
-| Spanner | Paxos + TrueTime | No | Google Cloud only, atomic clocks |
+## Comparison with AP setup
 
-These systems coordinate writes across nodes *before* committing, so all nodes agree on the order of operations. The tradeoff is latency—every write requires a network round-trip for consensus.
-
-## Why pglogical?
-
-PostgreSQL has built-in replication, but it doesn't support multi-master out of the box:
-
-| Type | Since | Extension | Multi-Master | CAP |
-|------|-------|-----------|--------------|-----|
-| Streaming replication (physical) | 9.0 | No | No (read-only standbys) | CP (if sync) |
-| Logical replication (native) | 10 | No | No (one-way pub/sub) | AP |
-| pglogical | - | Yes | Yes | AP |
-
-### Built-in streaming replication
-
-```
-Primary → WAL bytes → Standby (read-only)
-```
-
-Ships raw WAL (Write-Ahead Log) bytes. Standby is read-only. Can be synchronous for CP guarantees. This is what most production HA setups use (Patroni, pg_auto_failover).
-
-### Built-in logical replication (PostgreSQL 10+)
-
-```sql
-CREATE PUBLICATION my_pub FOR TABLE users;      -- on publisher
-CREATE SUBSCRIPTION my_sub CONNECTION '...' PUBLICATION my_pub;  -- on subscriber
-```
-
-Row-level changes, one-way only. Can replicate a subset of tables, cross major versions.
-
-### pglogical adds
-
-- **Bidirectional replication** (both nodes accept writes)
-- **Conflict resolution** (what to do when same row modified on both)
-- Works on older PostgreSQL versions
-
-If you don't need multi-master, use built-in replication. It's simpler and (for streaming) can be CP.
+| Aspect | This branch (CP) | Main branch (AP) |
+|--------|------------------|------------------|
+| Topology | Primary-Standby | Active-Active |
+| Writes | Single node only | Both nodes |
+| Consistency | Strong | Eventual |
+| Partition behavior | Blocks writes | Both continue, conflicts possible |
+| Data loss risk | Zero | Possible (last-write-wins) |
+| Failover | Manual promotion | N/A (both always active) |
 
 ## Technologies used
 
-* GitHub Actions
-* GitHub Container Registry
 * Terraform - https://github.com/vultr/terraform-provider-vultr
 * Vultr - https://www.vultr.com/
 * cloud-init - https://cloud-init.io/
 * k3s (Kubernetes) - https://github.com/k3s-io/k3s
 * Docker
-* PostgreSQL - https://hub.docker.com/r/bitnami/postgresql
-* pglogical - https://github.com/2ndQuadrant/pglogical
+* PostgreSQL 17 (stock bitnami image) - https://hub.docker.com/r/bitnami/postgresql
 * just (Justfile) - https://github.com/casey/just
-* Git / Linux / SSH / Bash
 
 ## How to use
 
 ```shell
+# Setup both nodes and configure replication
 just setup-replication
+
+# Check replication status
+just status
+
+# Verify data exists on both nodes
+just verify-data
+
+# Insert test data on primary
+just insert-test
+
+# Manual failover (promote standby)
+just failover
+```
+
+## File structure
+
+```
+manifests/
+  postgresql.yaml       # K8s manifest (same for both nodes)
+
+sql/
+  common/
+    postgres-setup.sql  # Create database, replication user, slot
+  templates/
+    schema.sql          # Table definitions
+    verify-replication.sql  # Status queries
+  data/
+    sample-data.sql     # Test data
+
+terraform/
+  modules/vultr_instance/
+    main.tf             # VM provisioning with cloud-init
+
+Justfile                # Automation tasks
 ```
