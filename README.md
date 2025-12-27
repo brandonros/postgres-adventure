@@ -78,11 +78,13 @@ Both nodes accept writes simultaneously. Changes replicate bidirectionally. This
 
 ### PostgreSQL CP options
 
-| Method | Built-in | Multi-Master | Notes |
-|--------|----------|--------------|-------|
-| Sync streaming replication | Yes | No | `synchronous_commit=on`, blocks until standby ACKs |
-| Patroni (sync mode) | No | No | HA orchestration with sync streaming |
-| pg_auto_failover | No | No | Automatic failover with sync replication |
+| Method | What it is | Automatic Failover | Notes |
+|--------|------------|-------------------|-------|
+| Sync streaming replication | Built-in feature | No | Raw capability; if primary dies, you manually promote standby |
+| Patroni (sync mode) | HA orchestration | Yes | Requires etcd/Consul/ZK for leader election; battle-tested, complex |
+| pg_auto_failover | HA orchestration | Yes | Simpler than Patroni; uses monitor node instead of external consensus |
+
+**Sync streaming** is the underlying mechanism—Patroni and pg_auto_failover are wrappers that add automatic failover on top of it. Without them, an operator must manually detect failure and promote a standby.
 
 CP requires Primary-Standby topology—there's no way to get CP with multi-master in PostgreSQL.
 
