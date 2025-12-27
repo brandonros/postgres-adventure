@@ -200,7 +200,7 @@ setup-replication: setup-primary setup-standby
 
     echo ""
     echo "Enabling synchronous replication..."
-    echo "ALTER SYSTEM SET synchronous_standby_names = 'standby1';" | just exec-psql dc1 postgres
+    echo "ALTER SYSTEM SET synchronous_standby_names = 'walreceiver';" | just exec-psql dc1 postgres
     echo "SELECT pg_reload_conf();" | just exec-psql dc1 postgres
 
     echo ""
