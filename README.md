@@ -88,6 +88,28 @@ Both nodes accept writes simultaneously. Changes replicate bidirectionally. This
 
 CP requires Primary-Standby topology—there's no way to get CP with multi-master in PostgreSQL.
 
+### Why external tools?
+
+PostgreSQL provides the replication engine but **not** high availability orchestration:
+
+| PostgreSQL provides | External tools provide |
+|---------------------|------------------------|
+| Replication mechanisms (streaming, logical) | Failure detection (is primary dead or just slow?) |
+| Promotion command (`pg_promote()`) | Automatic promotion decision (which standby?) |
+| | Fencing (preventing split-brain) |
+
+The reasoning: failure detection and leader election are hard distributed systems problems that require consensus. PostgreSQL's philosophy is "do one thing well" (be a database engine).
+
+```
+PostgreSQL (replication engine)
+     ↑
+Patroni / pg_auto_failover / repmgr (HA orchestration)
+     ↑
+etcd / Consul / ZooKeeper (consensus for leader election)
+```
+
+This differs from MySQL Group Replication or SQL Server Always On, which bake HA logic into the database. PostgreSQL makes you assemble the stack, but gives you flexibility in how you do it.
+
 ### Consensus-based alternatives
 
 For true CP with multi-master writes, you need a database designed around distributed consensus (Raft, Paxos):
