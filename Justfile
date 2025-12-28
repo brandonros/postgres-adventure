@@ -330,6 +330,14 @@ rebuild-standby node:
             PRIMARY="dc1"
             echo "WARNING: Split-brain detected. Treating dc1 as primary."
         fi
+    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "error" ]; then
+        # dc1 is primary, dc2 is stopped/unreachable
+        PRIMARY="dc1"
+        echo "Note: dc2 is stopped/unreachable, dc1 is primary."
+    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "error" ]; then
+        # dc2 is primary, dc1 is stopped/unreachable
+        PRIMARY="dc2"
+        echo "Note: dc1 is stopped/unreachable, dc2 is primary."
     else
         echo "ERROR: Could not find a primary node (both in recovery or unreachable)."
         exit 1
