@@ -1,0 +1,198 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: postgresql
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgresql-config
+  namespace: postgresql
+data:
+  postgresql.conf: |
+    # replication
+    wal_level = 'logical'
+    max_replication_slots = 10
+    max_wal_senders = 10
+    track_commit_timestamp = on
+
+    # Connection Settings
+    listen_addresses = '*'
+    max_connections = 100
+    superuser_reserved_connections = 10
+
+    # Memory Settings
+    shared_buffers = 256MB
+    work_mem = 4MB
+    maintenance_work_mem = 64MB
+    effective_cache_size = 512MB
+    huge_pages = try
+
+    # Parallel Processing
+    max_worker_processes = 10
+    max_parallel_workers = 10
+    max_parallel_workers_per_gather = 1
+    max_parallel_maintenance_workers = 1
+
+    # Performance Settings
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    seq_page_cost = 1
+
+    # WAL Settings
+    wal_buffers = 16MB
+    wal_writer_delay = 10ms
+    wal_writer_flush_after = 1MB
+    checkpoint_completion_target = 0.9
+    checkpoint_timeout = 10min
+    max_wal_size = 1GB
+    min_wal_size = 80MB
+
+    # Connection and Statement Timeouts
+    statement_timeout = 30s
+    idle_in_transaction_session_timeout = 60s
+    lock_timeout = 10s
+    deadlock_timeout = 1s
+
+    # Logging
+    log_min_duration_statement = 1000
+    log_connections = off
+    log_disconnections = off
+    log_lock_waits = on
+    log_temp_files = 100MB
+    log_checkpoints = on
+
+    # Statistics and Monitoring
+    track_activities = on
+    track_counts = on
+    track_io_timing = on
+    track_functions = pl
+
+    # Background Writer
+    bgwriter_delay = 200ms
+    bgwriter_lru_maxpages = 100
+    bgwriter_lru_multiplier = 2.0
+    bgwriter_flush_after = 512kB
+
+    # Auto-vacuum
+    autovacuum = on
+    autovacuum_max_workers = 3
+    autovacuum_naptime = 30s
+    autovacuum_vacuum_threshold = 25
+    autovacuum_analyze_threshold = 25
+    autovacuum_vacuum_scale_factor = 0.1
+    autovacuum_analyze_scale_factor = 0.05
+    autovacuum_vacuum_cost_limit = 2000
+
+    # Network settings
+    tcp_keepalives_idle = 300
+    tcp_keepalives_interval = 15
+    tcp_keepalives_count = 3
+
+    # Additional high-performance settings
+    fsync = on
+    full_page_writes = on
+    wal_compression = on
+
+    # JIT compilation for complex queries
+    jit = on
+    jit_above_cost = 100000
+    jit_optimize_above_cost = 500000
+
+    # Shared preload libraries for performance extensions
+    shared_preload_libraries = 'pg_stat_statements,pglogical'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql
+  namespace: postgresql
+spec:
+  type: NodePort
+  selector:
+    app: postgresql
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+      nodePort: 30432
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgresql
+  namespace: postgresql
+spec:
+  serviceName: postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgresql
+  template:
+    metadata:
+      labels:
+        app: postgresql
+    spec:
+      initContainers:
+        - name: setup-config
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Setting up PostgreSQL config directory..."
+              mkdir -p /bitnami/postgresql/conf
+              cp /config-source/postgresql.conf /bitnami/postgresql/conf/postgresql.conf
+              chown -R 1001:1001 /bitnami/postgresql/conf
+              chmod 644 /bitnami/postgresql/conf/postgresql.conf
+              echo "Config setup complete"
+          volumeMounts:
+            - name: postgresql-config
+              mountPath: /config-source
+            - name: postgres-data
+              mountPath: /bitnami/postgresql
+
+      containers:
+        - name: postgresql
+          image: ghcr.io/brandonros/postgres-adventure:fa9d649c0cc4b12010db0bf03c50eaba7bea5b6d
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          env:
+            - name: POSTGRESQL_PASSWORD
+              value: "Test_Password123!"
+            - name: POSTGRESQL_DATABASE
+              value: "postgres"
+            - name: POSTGRESQL_USERNAME
+              value: "postgres"
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /bitnami/postgresql
+            - name: postgresql-config
+              mountPath: /bitnami/postgresql/conf
+
+      volumes:
+        - name: postgresql-config
+          configMap:
+            name: postgresql-config
+
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 8Gi

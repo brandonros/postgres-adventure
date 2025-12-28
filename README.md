@@ -1,155 +1,98 @@
-# postgres-adventure (CP branch)
+# PostgreSQL Replication: CAP Theorem in Practice
 
-Proof of concept **synchronous streaming replication** with manual failover.
+This project demonstrates two PostgreSQL replication strategies through the lens of the CAP theorem. Each approach makes different tradeoffs between Consistency, Availability, and Partition tolerance.
 
-**See the [main branch](https://github.com/brandonros/postgres-adventure/tree/main) for the AP (active-active pglogical) setup.**
+## The CAP Theorem
 
-## What this demonstrates
+In distributed systems, you can only guarantee two of three properties:
 
-- Primary-Standby topology with synchronous replication
-- Zero data loss guarantee (synchronous commit)
-- Hot standby (read-only queries on standby)
-- Manual failover via `pg_promote()`
+- **C**onsistency: Every read receives the most recent write
+- **A**vailability: Every request receives a response
+- **P**artition tolerance: System continues operating despite network partitions
 
-## Architecture
+Since network partitions are inevitable, the real choice is between **CP** and **AP**.
 
-```
-dc1 (Primary)  ──WAL──>  dc2 (Standby)
-   writes                 read-only
-```
+## Two Approaches
 
-- **dc1**: Primary node, accepts all writes
-- **dc2**: Hot standby, receives WAL stream, read-only queries allowed
-- **Synchronous**: Primary waits for standby ACK before commit returns
+| | [AP](./ap/) | [CP](./cp/) |
+|---|---|---|
+| **Tradeoff** | Availability + Partition tolerance | Consistency + Partition tolerance |
+| **Topology** | Active-Active | Active-Passive |
+| **Replication** | Logical (pglogical) | Physical (streaming) |
+| **Writeable nodes** | Both | Primary only |
+| **During partition** | Both nodes accept writes | Primary blocks until standby reachable |
+| **Conflict handling** | Application must resolve | N/A (single writer) |
+| **Failover** | Automatic (both always active) | Manual promotion required |
+| **Data loss risk** | Conflicts possible | Zero (synchronous) |
 
-## CAP theorem
-
-The CAP theorem states distributed databases can only guarantee two of three properties:
-- **C**onsistency: All nodes see the same data at the same time
-- **A**vailability: Every request gets a response (even during failures)
-- **P**artition tolerance: System works despite network failures between nodes
-
-Since network partitions *will* happen, real systems choose either CP (consistent but may reject writes during partitions) or AP (available but may have temporary inconsistencies).
-
-**This setup is CP** (Consistent + Partition-tolerant):
-
-| Property | Behavior |
-|----------|----------|
-| Consistency | Guaranteed - standby always has committed data |
-| Availability | Sacrificed - writes block if standby unreachable |
-| Partition tolerance | Yes - system handles network failures |
-
-When the standby is unreachable, the primary will **block writes** rather than risk data loss. This is the CP tradeoff.
-
-## How synchronous streaming replication works
-
-1. Client sends `INSERT` to primary
-2. Primary writes to WAL (Write-Ahead Log)
-3. Primary streams WAL to standby
-4. Standby writes WAL to disk and ACKs
-5. Primary commits and returns success to client
-
-The key is step 4-5: the primary **waits for standby acknowledgment** before telling the client the transaction succeeded. If the standby is down, writes block.
-
-### Key configuration
+## AP: Available During Partitions
 
 ```
-# Primary postgresql.conf
-wal_level = replica
-synchronous_commit = on
-synchronous_standby_names = 'standby1'
-
-# Standby (created by pg_basebackup)
-primary_conninfo = 'host=<primary> user=replicator application_name=standby1'
-primary_slot_name = 'standby1_slot'
+┌─────────┐                    ┌─────────┐
+│   dc1   │◄──── pglogical ───►│   dc2   │
+│ (write) │     replication    │ (write) │
+└─────────┘                    └─────────┘
 ```
 
-## Manual failover procedure
+Both nodes accept writes. Changes replicate bidirectionally. If a partition occurs, both continue serving requests independently. When connectivity resumes, conflicts may need resolution.
 
-This setup uses **manual failover**. When the primary fails:
+**Best for**: High availability requirements, geo-distributed writes, read scaling
 
-1. Verify standby is caught up (check `pg_stat_replication`)
-2. Stop writes to primary (application-level)
-3. Promote standby: `SELECT pg_promote();`
-4. Update application connection strings to point to new primary
-5. (Optional) Rebuild old primary as new standby
-
-```shell
-# Check replication status
-just status
-
-# Promote standby to primary
-just failover
-just rebuild-standby dc1    # dc1 becomes standby of dc2
+```bash
+cd ap && just setup-replication
 ```
 
-### Why manual failover?
+## CP: Consistent During Partitions
 
-For critical workloads (banks, fintech), manual failover is often preferred:
-- Operators verify the situation before acting
-- No risk of split-brain from automated decisions
-- Downtime is acceptable; data loss is not
+```
+┌─────────┐                    ┌─────────┐
+│   dc1   │───── streaming ───►│   dc2   │
+│ PRIMARY │     replication    │ STANDBY │
+│ (write) │                    │ (read)  │
+└─────────┘                    └─────────┘
+```
 
-For automatic failover, use tools like Patroni or pg_auto_failover (not included here).
+Single primary accepts writes. Synchronous replication ensures standby has all committed data. If standby is unreachable, primary blocks writes rather than risk inconsistency.
 
-## Comparison with AP setup
+**Best for**: Financial systems, inventory, anywhere consistency is non-negotiable
 
-| Aspect | This branch (CP) | Main branch (AP) |
-|--------|------------------|------------------|
-| Topology | Primary-Standby | Active-Active |
-| Writes | Single node only | Both nodes |
-| Consistency | Strong | Eventual |
-| Partition behavior | Blocks writes | Both continue, conflicts possible |
-| Data loss risk | Zero | Possible (last-write-wins) |
-| Failover | Manual promotion | N/A (both always active) |
+```bash
+cd cp && just setup-replication
+```
 
-## Technologies used
+### Failover (CP)
 
-* Terraform - https://github.com/vultr/terraform-provider-vultr
-* Vultr - https://www.vultr.com/
-* cloud-init - https://cloud-init.io/
-* k3s (Kubernetes) - https://github.com/k3s-io/k3s
-* Docker
-* PostgreSQL 17 (official image) - https://hub.docker.com/_/postgres
-* just (Justfile) - https://github.com/casey/just
+```bash
+cd cp
+just failover           # Promote standby to primary
+just rebuild-standby dc1  # Rebuild old primary as new standby
+```
 
-## How to use
+## Prerequisites
 
-```shell
-# Setup both nodes and configure replication
+- Terraform
+- Just (command runner)
+- SSH key at `~/.ssh/id_rsa.pub`
+- Vultr API key (or modify terraform for your cloud)
+
+## Quick Start
+
+```bash
+# Choose your tradeoff
+cd ap  # or cd cp
+
+# Provision infrastructure and setup replication
 just setup-replication
 
-# Check replication status
+# Check status
 just status
 
-# Verify data exists on both nodes
-just verify-data
-
-# Insert test data on primary
-just insert-test
-
-# Manual failover (promote standby)
-just failover
+# Clean up
+just destroy
 ```
 
-## File structure
+## Further Reading
 
-```
-manifests/
-  postgresql.yaml       # K8s manifest (same for both nodes)
-
-sql/
-  common/
-    postgres-setup.sql  # Create database, replication user, slot
-  templates/
-    schema.sql          # Table definitions
-    verify-replication.sql  # Status queries
-  data/
-    sample-data.sql     # Test data
-
-terraform/
-  modules/vultr_instance/
-    main.tf             # VM provisioning with cloud-init
-
-Justfile                # Automation tasks
-```
+- [CAP Theorem](https://en.wikipedia.org/wiki/CAP_theorem)
+- [PostgreSQL Streaming Replication](https://www.postgresql.org/docs/current/warm-standby.html)
+- [pglogical](https://github.com/2ndQuadrant/pglogical)
