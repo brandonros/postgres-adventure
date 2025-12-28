@@ -9,6 +9,11 @@ script_path := justfile_directory()
 default:
     @just --list
 
+# ============================================================================
+# INFRASTRUCTURE
+# ============================================================================
+
+# Provision VM infrastructure
 vm:
     #!/usr/bin/env bash
     set -e
@@ -27,123 +32,154 @@ destroy:
     terraform destroy -auto-approve
     echo "Infrastructure destroyed!"
 
+# ============================================================================
+# INTERNAL HELPERS (prefixed with _)
+# ============================================================================
+
+# Get recovery status for a node (outputs: t, f, or error)
+_recovery-status node:
+    #!/usr/bin/env bash
+    result=$(echo "SELECT pg_is_in_recovery();" | just exec-psql {{ node }} postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
+    [ -z "$result" ] && result="error"
+    echo "$result"
+
+# Detect topology - outputs eval-able: DC1=x DC2=x PRIMARY=x STANDBY=x STATUS=x
+_detect-topology:
+    #!/usr/bin/env bash
+    DC1=$(just _recovery-status dc1)
+    DC2=$(just _recovery-status dc2)
+
+    if [ "$DC1" = "f" ] && [ "$DC2" = "t" ]; then
+        echo "DC1=$DC1 DC2=$DC2 PRIMARY=dc1 STANDBY=dc2 STATUS=ok"
+    elif [ "$DC2" = "f" ] && [ "$DC1" = "t" ]; then
+        echo "DC1=$DC1 DC2=$DC2 PRIMARY=dc2 STANDBY=dc1 STATUS=ok"
+    elif [ "$DC1" = "f" ] && [ "$DC2" = "f" ]; then
+        echo "DC1=$DC1 DC2=$DC2 PRIMARY=dc1 STANDBY=dc2 STATUS=split-brain"
+    elif [ "$DC1" = "f" ] && [ "$DC2" = "error" ]; then
+        echo "DC1=$DC1 DC2=$DC2 PRIMARY=dc1 STANDBY=dc2 STATUS=standby-down"
+    elif [ "$DC2" = "f" ] && [ "$DC1" = "error" ]; then
+        echo "DC1=$DC1 DC2=$DC2 PRIMARY=dc2 STANDBY=dc1 STATUS=standby-down"
+    elif [ "$DC1" = "t" ] && [ "$DC2" = "t" ]; then
+        echo "DC1=$DC1 DC2=$DC2 PRIMARY=unknown STANDBY=unknown STATUS=no-primary"
+    else
+        echo "DC1=$DC1 DC2=$DC2 PRIMARY=unknown STANDBY=unknown STATUS=unknown"
+    fi
+
+# Run kubectl on remote instance
+_kubectl instance_name +args:
+    #!/usr/bin/env bash
+    set -e
+    cd {{ script_path }}/terraform
+    IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
+    USER=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
+    PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
+    ssh -p $PORT $USER@$IP "KUBECONFIG=/home/debian/.kube/config kubectl {{ args }}"
+
+# ============================================================================
+# SSH & CONNECTION HELPERS
+# ============================================================================
+
 # Wait for host and accept SSH key
 wait-and-accept instance_name: vm
     #!/usr/bin/env bash
     set -e
-
-    # Get instance details from terraform
     cd {{ script_path }}/terraform
-    INSTANCE_IPV4=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
-    INSTANCE_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
+    IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
+    PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
 
-    if [ "$INSTANCE_IPV4" = "null" ] || [ -z "$INSTANCE_IPV4" ]; then
+    if [ "$IP" = "null" ] || [ -z "$IP" ]; then
         echo "Instance '{{ instance_name }}' not found in terraform outputs"
         exit 1
     fi
 
-    # Wait for host to be available
-    echo "Waiting for ${INSTANCE_IPV4} to become available on port ${INSTANCE_SSH_PORT}..."
-    while ! (echo > /dev/tcp/${INSTANCE_IPV4}/${INSTANCE_SSH_PORT}) 2>/dev/null; do
+    echo "Waiting for ${IP} to become available on port ${PORT}..."
+    while ! (echo > /dev/tcp/${IP}/${PORT}) 2>/dev/null; do
         sleep 1
     done
-    echo "${INSTANCE_IPV4} is now available"
+    echo "${IP} is now available"
 
-    # Remove old fingerprint if exists
-    if ssh-keygen -F ${INSTANCE_IPV4} > /dev/null 2>&1; then
-        ssh-keygen -R ${INSTANCE_IPV4}
-    fi
-
-    # Accept new SSH fingerprint
-    ssh-keyscan -H -p ${INSTANCE_SSH_PORT} ${INSTANCE_IPV4} >> ~/.ssh/known_hosts
+    # Remove old fingerprint if exists and accept new one
+    ssh-keygen -F ${IP} > /dev/null 2>&1 && ssh-keygen -R ${IP}
+    ssh-keyscan -H -p ${PORT} ${IP} >> ~/.ssh/known_hosts
     echo "SSH key accepted"
 
-# Connect
+# Connect to instance via SSH
 connect instance_name: (wait-and-accept instance_name)
     #!/usr/bin/env bash
     set -e
-
-    # Get instance details from terraform
     cd {{ script_path }}/terraform
-    INSTANCE_IPV4=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
-    INSTANCE_USERNAME=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
-    INSTANCE_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
+    IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
+    USER=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
+    PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
+    ssh -p ${PORT} ${USER}@${IP}
 
-    ssh -p ${INSTANCE_SSH_PORT} ${INSTANCE_USERNAME}@${INSTANCE_IPV4}
+# Execute shell command on instance
+exec-ssh instance_name cmd:
+    #!/usr/bin/env bash
+    set -e
+    cd {{ script_path }}/terraform
+    IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
+    USER=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
+    PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
+    ssh -p $PORT $USER@$IP "{{ cmd }}"
 
-# Helper: Wait for PostgreSQL pod to be ready
+# ============================================================================
+# POSTGRESQL HELPERS
+# ============================================================================
+
+# Wait for PostgreSQL pod to be ready
 wait-for-postgres instance_name:
     #!/usr/bin/env bash
     set -e
-
-    cd {{ script_path }}/terraform
-    INSTANCE_IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
-    INSTANCE_USERNAME=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
-    INSTANCE_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
-
     echo "Waiting for PostgreSQL pod on {{ instance_name }} to be ready..."
-    while ! ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP 'KUBECONFIG=/home/debian/.kube/config kubectl get pod postgresql-0 -n postgresql 2>/dev/null | grep -q "1/1.*Running"'; do
+    while ! just _kubectl {{ instance_name }} get pod postgresql-0 -n postgresql 2>/dev/null | grep -q "1/1.*Running"; do
         echo "   Waiting for postgresql-0 pod on {{ instance_name }}..."
         sleep 2
     done
     echo "PostgreSQL pod on {{ instance_name }} is ready"
 
     echo "Waiting for PostgreSQL service on {{ instance_name }} to accept connections..."
-    while ! ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP 'KUBECONFIG=/home/debian/.kube/config kubectl exec postgresql-0 -n postgresql -- bash -c "PGPASSWORD=\"Test_Password123!\" psql -U postgres -d postgres -c \"SELECT 1\" > /dev/null 2>&1"'; do
+    while ! just _kubectl {{ instance_name }} exec postgresql-0 -n postgresql -- bash -c 'PGPASSWORD="Test_Password123!" psql -U postgres -d postgres -c "SELECT 1" > /dev/null 2>&1'; do
         echo "   Waiting for PostgreSQL service on {{ instance_name }}..."
         sleep 2
     done
     echo "PostgreSQL service on {{ instance_name }} is accepting connections"
 
-# Helper: Execute PostgreSQL command
+# Execute PostgreSQL command (pipe SQL via stdin, or pass sql_file)
 exec-psql instance_name database sql_file="":
     #!/usr/bin/env bash
     set -e
-
     cd {{ script_path }}/terraform
-    INSTANCE_IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
-    INSTANCE_USERNAME=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
-    INSTANCE_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
+    IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
+    USER=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
+    PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
 
-    # -e = echo queries, -v ON_ERROR_STOP=1 = stop on first error
     PSQL_OPTS="-e -v ON_ERROR_STOP=1"
 
     if [ -z "{{ sql_file }}" ]; then
-        ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP \
+        ssh -p $PORT $USER@$IP \
             "KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c 'PGPASSWORD=\"Test_Password123!\" psql $PSQL_OPTS -U postgres -d {{ database }}'"
     else
-        cat {{ script_path }}/{{ sql_file }} | ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP \
+        cat {{ script_path }}/{{ sql_file }} | ssh -p $PORT $USER@$IP \
             "KUBECONFIG=/home/debian/.kube/config kubectl exec -i postgresql-0 -n postgresql -- bash -c 'PGPASSWORD=\"Test_Password123!\" psql $PSQL_OPTS -U postgres -d {{ database }}'"
     fi
 
-# Helper: Execute shell command on instance
-exec-ssh instance_name cmd:
-    #!/usr/bin/env bash
-    set -e
-
-    cd {{ script_path }}/terraform
-    INSTANCE_IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ instance_name }}"]')
-    INSTANCE_USERNAME=$(terraform output -json instance_usernames | jq -r '.["{{ instance_name }}"]')
-    INSTANCE_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ instance_name }}"]')
-
-    ssh -p $INSTANCE_SSH_PORT $INSTANCE_USERNAME@$INSTANCE_IP "{{ cmd }}"
+# ============================================================================
+# INITIAL SETUP
+# ============================================================================
 
 # Setup primary node (dc1)
 setup-primary: (wait-and-accept "dc1") (wait-for-postgres "dc1")
     #!/usr/bin/env bash
     set -e
-
     echo "Setting up primary node (dc1)..."
 
-    # Create database, replication user, and replication slot
     echo "Running postgres-setup.sql on dc1..."
     just exec-psql dc1 postgres sql/common/postgres-setup.sql
 
-    # Create schema
     echo "Running schema.sql on dc1..."
     just exec-psql dc1 my_db sql/templates/schema.sql
 
-    # Insert sample data
     echo "Running sample-data.sql on dc1..."
     just exec-psql dc1 my_db sql/data/sample-data.sql
 
@@ -153,51 +189,35 @@ setup-primary: (wait-and-accept "dc1") (wait-for-postgres "dc1")
 setup-standby: (wait-and-accept "dc2") (wait-for-postgres "dc2")
     #!/usr/bin/env bash
     set -e
-
     echo "Setting up standby node (dc2)..."
 
     cd {{ script_path }}/terraform
     DC1_IP=$(terraform output -json instance_ipv4s | jq -r '.["dc1"]')
-    DC2_IP=$(terraform output -json instance_ipv4s | jq -r '.["dc2"]')
-    DC2_USERNAME=$(terraform output -json instance_usernames | jq -r '.["dc2"]')
-    DC2_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["dc2"]')
 
     echo "Primary (dc1) IP: $DC1_IP"
-    echo "Standby (dc2) IP: $DC2_IP"
 
-    # Scale down postgresql to stop the pod
     echo "Stopping PostgreSQL pod on dc2..."
-    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=0'
+    just _kubectl dc2 scale statefulset postgresql -n postgresql --replicas=0
     sleep 5
 
-    # Run pg_basebackup job (-R creates standby.signal and postgresql.auto.conf)
     echo "Running pg_basebackup to clone from primary..."
-
-    # Delete any existing job first
-    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl delete job pg-basebackup -n postgresql --ignore-not-found"
-
-    # Apply job with PRIMARY_HOST set
+    just _kubectl dc2 delete job pg-basebackup -n postgresql --ignore-not-found
     sed "s/PLACEHOLDER/$DC1_IP/" {{ script_path }}/manifests/pg-basebackup-job.yaml | \
-        ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl apply -f -"
+        just _kubectl dc2 apply -f -
 
-    # Wait for job to complete and show logs
-    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl wait --for=condition=complete job/pg-basebackup -n postgresql --timeout=300s"
-    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP "KUBECONFIG=/home/debian/.kube/config kubectl logs job/pg-basebackup -n postgresql"
+    just _kubectl dc2 wait --for=condition=complete job/pg-basebackup -n postgresql --timeout=300s
+    just _kubectl dc2 logs job/pg-basebackup -n postgresql
 
-    # Scale back up
     echo "Starting PostgreSQL pod on dc2..."
-    ssh -p $DC2_SSH_PORT $DC2_USERNAME@$DC2_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=1'
+    just _kubectl dc2 scale statefulset postgresql -n postgresql --replicas=1
 
-    # Wait for standby to be ready
     just wait-for-postgres dc2
-
     echo "Standby node (dc2) setup complete!"
 
-# Main setup - sets up primary then standby
+# Full replication setup - primary then standby with sync replication
 setup-replication: setup-primary setup-standby
     #!/usr/bin/env bash
     set -e
-
     echo ""
     echo "Enabling synchronous replication..."
     echo "ALTER SYSTEM SET synchronous_standby_names = 'walreceiver';" | just exec-psql dc1 postgres
@@ -207,42 +227,20 @@ setup-replication: setup-primary setup-standby
     echo "============================================"
     echo "Streaming replication setup complete!"
     echo "============================================"
-    echo ""
-    echo "Checking replication status..."
     just status
+
+# ============================================================================
+# OPERATIONS
+# ============================================================================
 
 # Check replication status (auto-detects topology)
 status:
     #!/usr/bin/env bash
     set -e
+    eval $(just _detect-topology)
 
-    # Detect current topology
-    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
-    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
-    [ -z "$DC1_IN_RECOVERY" ] && DC1_IN_RECOVERY="error"
-    [ -z "$DC2_IN_RECOVERY" ] && DC2_IN_RECOVERY="error"
-
-    if [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "t" ]; then
-        PRIMARY="dc1"
-        STANDBY="dc2"
-    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "t" ]; then
-        PRIMARY="dc2"
-        STANDBY="dc1"
-    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "f" ]; then
-        echo "WARNING: Both nodes are primaries (split-brain)"
-        PRIMARY="dc1"
-        STANDBY="dc2"
-    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "error" ]; then
-        PRIMARY="dc1"
-        STANDBY="dc2"
-    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "error" ]; then
-        PRIMARY="dc2"
-        STANDBY="dc1"
-    else
-        echo "WARNING: Could not determine topology"
-        PRIMARY="dc1"
-        STANDBY="dc2"
-    fi
+    [ "$STATUS" = "split-brain" ] && echo "WARNING: Both nodes are primaries (split-brain)"
+    [ "$STATUS" = "unknown" ] && echo "WARNING: Could not determine topology"
 
     echo ""
     echo "=== Primary ($PRIMARY) - pg_stat_replication ==="
@@ -252,43 +250,32 @@ status:
     echo "=== Standby ($STANDBY) - pg_stat_wal_receiver ==="
     echo "SELECT * FROM pg_stat_wal_receiver;" | just exec-psql $STANDBY postgres || true
 
-# Manual failover - promote standby to primary (idempotent, bidirectional)
+# Manual failover - promote standby to primary
 failover:
     #!/usr/bin/env bash
     set -e
-
     echo "MANUAL FAILOVER PROCEDURE"
     echo "========================="
     echo ""
 
-    # Check both nodes to determine current topology
     echo "Detecting current topology..."
-    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
-    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
-    [ -z "$DC1_IN_RECOVERY" ] && DC1_IN_RECOVERY="error"
-    [ -z "$DC2_IN_RECOVERY" ] && DC2_IN_RECOVERY="error"
-
-    echo "  dc1 in recovery: $DC1_IN_RECOVERY"
-    echo "  dc2 in recovery: $DC2_IN_RECOVERY"
+    eval $(just _detect-topology)
+    echo "  dc1 in recovery: $DC1"
+    echo "  dc2 in recovery: $DC2"
     echo ""
 
-    # Determine which node to promote
-    if [ "$DC1_IN_RECOVERY" = "t" ] && [ "$DC2_IN_RECOVERY" = "f" ]; then
-        STANDBY="dc1"
-        PRIMARY="dc2"
-    elif [ "$DC2_IN_RECOVERY" = "t" ] && [ "$DC1_IN_RECOVERY" = "f" ]; then
-        STANDBY="dc2"
-        PRIMARY="dc1"
-    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "f" ]; then
-        echo "ERROR: Both nodes are primaries (split-brain). Manual intervention required."
-        exit 1
-    elif [ "$DC1_IN_RECOVERY" = "t" ] && [ "$DC2_IN_RECOVERY" = "t" ]; then
-        echo "ERROR: Both nodes are standbys. No primary available."
-        exit 1
-    else
-        echo "ERROR: Could not determine topology. Check node connectivity."
-        exit 1
-    fi
+    # Validate we can failover
+    case "$STATUS" in
+        split-brain)
+            echo "ERROR: Both nodes are primaries (split-brain). Manual intervention required."
+            exit 1 ;;
+        no-primary)
+            echo "ERROR: Both nodes are standbys. No primary available."
+            exit 1 ;;
+        unknown)
+            echo "ERROR: Could not determine topology. Check node connectivity."
+            exit 1 ;;
+    esac
 
     echo "Current topology: $PRIMARY is primary, $STANDBY is standby"
     echo ""
@@ -298,11 +285,7 @@ failover:
 
     echo ""
     echo "Step 2: Stopping old primary ($PRIMARY) to prevent split-brain..."
-    cd {{ script_path }}/terraform
-    PRIMARY_IP=$(terraform output -json instance_ipv4s | jq -r ".[\"$PRIMARY\"]")
-    PRIMARY_USERNAME=$(terraform output -json instance_usernames | jq -r ".[\"$PRIMARY\"]")
-    PRIMARY_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r ".[\"$PRIMARY\"]")
-    ssh -p $PRIMARY_SSH_PORT $PRIMARY_USERNAME@$PRIMARY_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=0'
+    just _kubectl $PRIMARY scale statefulset postgresql -n postgresql --replicas=0
 
     echo ""
     echo "Step 3: Promoting $STANDBY to primary..."
@@ -310,7 +293,7 @@ failover:
 
     echo ""
     echo "Step 4: Waiting for promotion to complete..."
-    while [ "$(echo 'SELECT pg_is_in_recovery();' | just exec-psql $STANDBY postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')" = "t" ]; do
+    while [ "$(just _recovery-status $STANDBY)" = "t" ]; do
         sleep 1
     done
     echo "Promotion complete."
@@ -330,42 +313,33 @@ failover:
 rebuild-standby node:
     #!/usr/bin/env bash
     set -e
-
     echo "REBUILD STANDBY: {{ node }}"
     echo "=========================="
     echo ""
 
-    # Determine which node is the current primary
-    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
-    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
-    [ -z "$DC1_IN_RECOVERY" ] && DC1_IN_RECOVERY="error"
-    [ -z "$DC2_IN_RECOVERY" ] && DC2_IN_RECOVERY="error"
+    eval $(just _detect-topology)
 
-    if [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "t" ]; then
-        PRIMARY="dc1"
-    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "t" ]; then
-        PRIMARY="dc2"
-    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "f" ]; then
-        # Split-brain: the node we're NOT rebuilding becomes the primary
-        if [ "{{ node }}" = "dc1" ]; then
-            PRIMARY="dc2"
-            echo "WARNING: Split-brain detected. Treating dc2 as primary."
-        else
-            PRIMARY="dc1"
-            echo "WARNING: Split-brain detected. Treating dc1 as primary."
-        fi
-    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "error" ]; then
-        # dc1 is primary, dc2 is stopped/unreachable
-        PRIMARY="dc1"
-        echo "Note: dc2 is stopped/unreachable, dc1 is primary."
-    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "error" ]; then
-        # dc2 is primary, dc1 is stopped/unreachable
-        PRIMARY="dc2"
-        echo "Note: dc1 is stopped/unreachable, dc2 is primary."
-    else
-        echo "ERROR: Could not find a primary node (both in recovery or unreachable)."
-        exit 1
-    fi
+    # Determine primary with special handling for rebuild scenarios
+    case "$STATUS" in
+        ok)
+            ;; # PRIMARY already set correctly
+        split-brain)
+            # The node we're NOT rebuilding becomes the primary
+            if [ "{{ node }}" = "dc1" ]; then
+                PRIMARY="dc2"
+            else
+                PRIMARY="dc1"
+            fi
+            echo "WARNING: Split-brain detected. Treating $PRIMARY as primary."
+            ;;
+        standby-down)
+            echo "Note: Standby is down, $PRIMARY is primary."
+            ;;
+        *)
+            echo "ERROR: Could not find a primary node (both in recovery or unreachable)."
+            exit 1
+            ;;
+    esac
 
     echo "Primary is: $PRIMARY"
     echo "Rebuilding {{ node }} as standby..."
@@ -373,39 +347,25 @@ rebuild-standby node:
 
     cd {{ script_path }}/terraform
     PRIMARY_IP=$(terraform output -json instance_ipv4s | jq -r ".[\"$PRIMARY\"]")
-    NODE_IP=$(terraform output -json instance_ipv4s | jq -r '.["{{ node }}"]')
-    NODE_USERNAME=$(terraform output -json instance_usernames | jq -r '.["{{ node }}"]')
-    NODE_SSH_PORT=$(terraform output -json instance_ssh_ports | jq -r '.["{{ node }}"]')
-
     echo "Primary IP: $PRIMARY_IP"
-    echo "Target IP: $NODE_IP"
 
-    # Stop postgresql on target
     echo "Stopping PostgreSQL on {{ node }}..."
-    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=0'
+    just _kubectl {{ node }} scale statefulset postgresql -n postgresql --replicas=0
     sleep 5
 
-    # Ensure replication slot exists on primary (may not exist after failover)
     echo "Ensuring replication slot exists on $PRIMARY..."
     echo "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_replication_slots WHERE slot_name = 'standby1_slot') THEN PERFORM pg_create_physical_replication_slot('standby1_slot'); END IF; END \$\$;" | just exec-psql $PRIMARY postgres
 
-    # Run pg_basebackup job (-R creates standby.signal and postgresql.auto.conf)
     echo "Running pg_basebackup from $PRIMARY..."
-
-    # Delete any existing job first
-    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl delete job pg-basebackup -n postgresql --ignore-not-found"
-
-    # Apply job with PRIMARY_HOST set
+    just _kubectl {{ node }} delete job pg-basebackup -n postgresql --ignore-not-found
     sed "s/PLACEHOLDER/$PRIMARY_IP/" {{ script_path }}/manifests/pg-basebackup-job.yaml | \
-        ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl apply -f -"
+        just _kubectl {{ node }} apply -f -
 
-    # Wait for job to complete and show logs
-    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl wait --for=condition=complete job/pg-basebackup -n postgresql --timeout=300s"
-    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP "KUBECONFIG=/home/debian/.kube/config kubectl logs job/pg-basebackup -n postgresql"
+    just _kubectl {{ node }} wait --for=condition=complete job/pg-basebackup -n postgresql --timeout=300s
+    just _kubectl {{ node }} logs job/pg-basebackup -n postgresql
 
-    # Start postgresql
     echo "Starting PostgreSQL on {{ node }}..."
-    ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=1'
+    just _kubectl {{ node }} scale statefulset postgresql -n postgresql --replicas=1
 
     just wait-for-postgres {{ node }}
 
@@ -418,11 +378,14 @@ rebuild-standby node:
     echo "{{ node }} rebuilt as standby of $PRIMARY"
     just status
 
-# Verify data is replicated
+# ============================================================================
+# TESTING & VERIFICATION
+# ============================================================================
+
+# Verify data is replicated on both nodes
 verify-data:
     #!/usr/bin/env bash
     set -e
-
     echo ""
     echo "=== Data on dc1 ==="
     echo "SELECT * FROM users; SELECT * FROM orders;" | just exec-psql dc1 my_db || true
@@ -435,28 +398,16 @@ verify-data:
 insert-test:
     #!/usr/bin/env bash
     set -e
+    eval $(just _detect-topology)
 
-    # Find the primary (check both nodes to detect split-brain)
-    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
-    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
-    [ -z "$DC1_IN_RECOVERY" ] && DC1_IN_RECOVERY="error"
-    [ -z "$DC2_IN_RECOVERY" ] && DC2_IN_RECOVERY="error"
-
-    if [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "t" ]; then
-        PRIMARY="dc1"
-    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "t" ]; then
-        PRIMARY="dc2"
-    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "error" ]; then
-        PRIMARY="dc1"
-    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "error" ]; then
-        PRIMARY="dc2"
-    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "f" ]; then
-        echo "ERROR: Both nodes are primaries (split-brain). Run 'just rebuild-standby <node>' first."
-        exit 1
-    else
-        echo "ERROR: Could not determine primary. Check node connectivity."
-        exit 1
-    fi
+    case "$STATUS" in
+        split-brain)
+            echo "ERROR: Both nodes are primaries (split-brain). Run 'just rebuild-standby <node>' first."
+            exit 1 ;;
+        no-primary|unknown)
+            echo "ERROR: Could not determine primary. Check node connectivity."
+            exit 1 ;;
+    esac
 
     echo "Inserting test row on primary ($PRIMARY)..."
     echo "INSERT INTO users (email, name) VALUES ('test-$(date +%s)@example.com', 'Test User');" | just exec-psql $PRIMARY my_db
