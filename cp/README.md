@@ -41,6 +41,47 @@ Since network partitions *will* happen, real systems choose either CP (consisten
 
 When the standby is unreachable, the primary will **block writes** rather than risk data loss. This is the CP tradeoff.
 
+## Beyond CAP: PACELC
+
+CAP only describes behavior during partitions. But what about normal operation? The **PACELC** model extends CAP:
+
+> "If there's a **P**artition, choose **A** or **C**. **E**lse (normal operation), choose **L**atency or **C**onsistency."
+
+This gives us three practical modes for streaming replication:
+
+| Mode | During Partition | Normal Operation | PACELC |
+|------|------------------|------------------|--------|
+| **Synchronous** (this demo) | Blocks writes (C) | Waits for standby ACK (C) | PC/EC |
+| **Asynchronous** | Blocks writes (C) | Commits immediately (L) | PC/EL |
+| AP (pglogical) | Both nodes write (A) | Async replication (L) | PA/EL |
+
+### Synchronous vs Asynchronous
+
+Both use the same streaming replication mechanism, but differ in commit behavior:
+
+```
+SYNCHRONOUS (PC/EC):
+Client ──► Primary ──► WAL ──► Standby ACK ──► Commit ──► Response
+                              (waits here)
+
+ASYNCHRONOUS (PC/EL):
+Client ──► Primary ──► WAL ──► Commit ──► Response
+                         └──► Standby (eventually)
+```
+
+| | Synchronous | Asynchronous |
+|---|---|---|
+| Latency | Higher (network round-trip) | Lower |
+| Data loss on failover | Zero | Possible (recent commits) |
+| Standby down | Primary blocks | Primary continues |
+| Use case | Financial, inventory | Most production workloads |
+
+**Async is what most production databases actually run.** The risk of losing a few seconds of commits on failover is acceptable for the latency benefits. Sync is reserved for cases where *any* data loss is unacceptable.
+
+### Switching to Async
+
+This demo defaults to synchronous. To switch to async, comment out the `synchronous_standby_names` line in the Justfile's `setup-replication` recipe (see the comments there).
+
 ## How synchronous streaming replication works
 
 1. Client sends `INSERT` to primary
