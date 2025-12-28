@@ -217,8 +217,10 @@ status:
     set -e
 
     # Detect current topology
-    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
-    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
+    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
+    [ -z "$DC1_IN_RECOVERY" ] && DC1_IN_RECOVERY="error"
+    [ -z "$DC2_IN_RECOVERY" ] && DC2_IN_RECOVERY="error"
 
     if [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "t" ]; then
         PRIMARY="dc1"
@@ -230,6 +232,12 @@ status:
         echo "WARNING: Both nodes are primaries (split-brain)"
         PRIMARY="dc1"
         STANDBY="dc2"
+    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "error" ]; then
+        PRIMARY="dc1"
+        STANDBY="dc2"
+    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "error" ]; then
+        PRIMARY="dc2"
+        STANDBY="dc1"
     else
         echo "WARNING: Could not determine topology"
         PRIMARY="dc1"
@@ -255,8 +263,10 @@ failover:
 
     # Check both nodes to determine current topology
     echo "Detecting current topology..."
-    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
-    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
+    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
+    [ -z "$DC1_IN_RECOVERY" ] && DC1_IN_RECOVERY="error"
+    [ -z "$DC2_IN_RECOVERY" ] && DC2_IN_RECOVERY="error"
 
     echo "  dc1 in recovery: $DC1_IN_RECOVERY"
     echo "  dc2 in recovery: $DC2_IN_RECOVERY"
@@ -326,8 +336,10 @@ rebuild-standby node:
     echo ""
 
     # Determine which node is the current primary
-    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
-    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
+    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
+    [ -z "$DC1_IN_RECOVERY" ] && DC1_IN_RECOVERY="error"
+    [ -z "$DC2_IN_RECOVERY" ] && DC2_IN_RECOVERY="error"
 
     if [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "t" ]; then
         PRIMARY="dc1"
@@ -425,12 +437,18 @@ insert-test:
     set -e
 
     # Find the primary (check both nodes to detect split-brain)
-    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
-    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ' || echo "error")
+    DC1_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc1 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
+    DC2_IN_RECOVERY=$(echo "SELECT pg_is_in_recovery();" | just exec-psql dc2 postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')
+    [ -z "$DC1_IN_RECOVERY" ] && DC1_IN_RECOVERY="error"
+    [ -z "$DC2_IN_RECOVERY" ] && DC2_IN_RECOVERY="error"
 
     if [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "t" ]; then
         PRIMARY="dc1"
     elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "t" ]; then
+        PRIMARY="dc2"
+    elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "error" ]; then
+        PRIMARY="dc1"
+    elif [ "$DC2_IN_RECOVERY" = "f" ] && [ "$DC1_IN_RECOVERY" = "error" ]; then
         PRIMARY="dc2"
     elif [ "$DC1_IN_RECOVERY" = "f" ] && [ "$DC2_IN_RECOVERY" = "f" ]; then
         echo "ERROR: Both nodes are primaries (split-brain). Run 'just rebuild-standby <node>' first."
