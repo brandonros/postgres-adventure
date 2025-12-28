@@ -219,6 +219,20 @@ setup-replication: setup-primary setup-standby
     #!/usr/bin/env bash
     set -e
     echo ""
+    # -------------------------------------------------------------------------
+    # CAP TRADEOFF: Synchronous vs Asynchronous Replication
+    # -------------------------------------------------------------------------
+    # SYNCHRONOUS (CP - Consistency + Partition tolerance):
+    #   - Primary waits for standby to confirm writes
+    #   - Zero data loss on failover
+    #   - Primary blocks if standby is unreachable
+    #
+    # ASYNCHRONOUS (faster, but may lose recent commits on failover):
+    #   - Primary doesn't wait for standby
+    #   - Lower latency, higher throughput
+    #   - Recent transactions may be lost if primary dies
+    #   - To use async: comment out the ALTER SYSTEM line below
+    # -------------------------------------------------------------------------
     echo "Enabling synchronous replication..."
     echo "ALTER SYSTEM SET synchronous_standby_names = 'walreceiver';" | just exec-psql dc1 postgres
     echo "SELECT pg_reload_conf();" | just exec-psql dc1 postgres
@@ -370,6 +384,7 @@ rebuild-standby node:
     just wait-for-postgres {{ node }}
 
     echo ""
+    # See setup-replication for sync vs async tradeoff
     echo "Re-enabling synchronous replication on $PRIMARY..."
     echo "ALTER SYSTEM SET synchronous_standby_names = 'walreceiver';" | just exec-psql $PRIMARY postgres
     echo "SELECT pg_reload_conf();" | just exec-psql $PRIMARY postgres
