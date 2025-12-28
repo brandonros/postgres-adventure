@@ -299,6 +299,18 @@ failover:
     echo "SELECT pg_promote();" | just exec-psql $STANDBY postgres
 
     echo ""
+    echo "Step 4: Waiting for promotion to complete..."
+    while [ "$(echo 'SELECT pg_is_in_recovery();' | just exec-psql $STANDBY postgres 2>/dev/null | grep -E '^ (t|f)' | tr -d ' ')" = "t" ]; do
+        sleep 1
+    done
+    echo "Promotion complete."
+
+    echo ""
+    echo "Step 5: Disabling synchronous replication (no standby available)..."
+    echo "ALTER SYSTEM SET synchronous_standby_names = '';" | just exec-psql $STANDBY postgres
+    echo "SELECT pg_reload_conf();" | just exec-psql $STANDBY postgres
+
+    echo ""
     echo "Failover complete! $STANDBY is now primary, $PRIMARY is stopped."
     echo ""
     echo "Next step: Rebuild $PRIMARY as standby:"
@@ -384,6 +396,11 @@ rebuild-standby node:
     ssh -p $NODE_SSH_PORT $NODE_USERNAME@$NODE_IP 'KUBECONFIG=/home/debian/.kube/config kubectl scale statefulset postgresql -n postgresql --replicas=1'
 
     just wait-for-postgres {{ node }}
+
+    echo ""
+    echo "Re-enabling synchronous replication on $PRIMARY..."
+    echo "ALTER SYSTEM SET synchronous_standby_names = 'walreceiver';" | just exec-psql $PRIMARY postgres
+    echo "SELECT pg_reload_conf();" | just exec-psql $PRIMARY postgres
 
     echo ""
     echo "{{ node }} rebuilt as standby of $PRIMARY"
